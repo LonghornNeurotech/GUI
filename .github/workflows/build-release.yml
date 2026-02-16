@@ -29,10 +29,23 @@ jobs:
           pip install pyinstaller
           pip install -r requirements.txt
 
-      - name: Build Executable with PyInstaller
-        # The ${{ runner.os }} variable dynamically names the file to prevent collisions later.
-        # Outputs: my_app_Windows.exe, my_app_Linux, and my_app_macOS
-        run: pyinstaller --onefile --name my_app_${{ runner.os }} GUI.py
+      - name: Build Executable (Windows & Linux)
+        if: runner.os != 'macOS'
+        # Adding --windowed ensures Windows doesn't open a background command prompt
+        run: pyinstaller --onefile --windowed --name my_app_${{ runner.os }} main.py
+
+      - name: Build .app Bundle (macOS)
+        if: runner.os == 'macOS'
+        # The --windowed flag tells PyInstaller to create a standard Mac .app bundle
+        run: pyinstaller --windowed --name my_app_macOS main.py
+
+      - name: Zip the macOS .app Bundle
+        if: runner.os == 'macOS'
+        # Since GitHub Releases can't host folders, we zip the .app bundle for users to download
+        run: |
+          cd dist
+          zip -r my_app_macOS.zip my_app_macOS.app
+          rm -rf my_app_macOS.app # Deletes the raw folder so only the .zip gets uploaded
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
