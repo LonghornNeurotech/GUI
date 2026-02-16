@@ -6,6 +6,8 @@ Displays segmented EEG data with channel selection and window navigation
 import sys
 import numpy as np
 import pyqtgraph as pg
+import PyQt5.QtOpenGL   # <--- ADD THIS
+import OpenGL           # <--- ADD THIS
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QCheckBox, QSlider, QSpinBox, QPushButton, QLabel, QGroupBox,
