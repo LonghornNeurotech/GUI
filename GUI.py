@@ -6,8 +6,6 @@ Displays segmented EEG data with channel selection and window navigation
 import sys
 import numpy as np
 import pyqtgraph as pg
-import PyQt5.QtOpenGL   # <--- ADD THIS
-import OpenGL           # <--- ADD THIS
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QCheckBox, QSlider, QSpinBox, QPushButton, QLabel, QGroupBox,
@@ -165,7 +163,7 @@ class SegmentViewer(QMainWindow):
     def __init__(self, window_size_sec=10.0, sampling_rate=125):
         super().__init__()
         # Enable OpenGL acceleration and antialiasing for smoother rendering
-        pg.setConfigOptions(useOpenGL=True, antialias=True)
+        pg.setConfigOptions(useOpenGL=False, antialias=True)
 
         self.raw_data = None  # No data loaded initially
         self.window_size_sec = window_size_sec

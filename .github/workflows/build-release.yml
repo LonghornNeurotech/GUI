@@ -33,11 +33,11 @@ jobs:
         if: runner.os != 'macOS'
         # Added brainflow and pylsl to the collection list. 
         # (Be sure to replace GUI.py with your actual script name if it's different in the workflow)
-        run: pyinstaller --onefile --windowed --collect-all mne --collect-all brainflow --collect-all pylsl --hidden-import PyQt5.QtOpenGL --hidden-import OpenGL --name NeuroTechGUI_${{ runner.os }} GUI.py
+        run: pyinstaller --onefile --windowed --collect-all mne --collect-all brainflow --collect-all pylsl --name NeuroTechGUI_${{ runner.os }} GUI.py
 
       - name: Build .app Bundle (macOS)
         if: runner.os == 'macOS'
-        run: pyinstaller --windowed --collect-all mne --collect-all brainflow --collect-all pylsl --hidden-import PyQt5.QtOpenGL --hidden-import OpenGL --name NeuroTechGUI_macOS GUI.py
+        run: pyinstaller --windowed --collect-all mne --collect-all brainflow --collect-all pylsl --name NeuroTechGUI_macOS GUI.py
 
       - name: Install Apple Certificate
         if: runner.os == 'macOS'
