@@ -32,12 +32,12 @@ jobs:
       - name: Build Executable (Windows & Linux)
         if: runner.os != 'macOS'
         # Adding --windowed ensures Windows doesn't open a background command prompt
-        run: pyinstaller --onefile --windowed --name my_app_${{ runner.os }} main.py
+        run: pyinstaller --onefile --windowed --name my_app_${{ runner.os }} GUI.py
 
       - name: Build .app Bundle (macOS)
         if: runner.os == 'macOS'
         # The --windowed flag tells PyInstaller to create a standard Mac .app bundle
-        run: pyinstaller --windowed --name my_app_macOS main.py
+        run: pyinstaller --windowed --name my_app_macOS GUI.py
 
       - name: Zip the macOS .app Bundle
         if: runner.os == 'macOS'
