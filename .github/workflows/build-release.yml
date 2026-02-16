@@ -32,20 +32,64 @@ jobs:
       - name: Build Executable (Windows & Linux)
         if: runner.os != 'macOS'
         # Added --collect-all mne to prevent the lazy_loader crash
-        run: pyinstaller --onefile --windowed --collect-all mne --name my_app_${{ runner.os }} GUI.py
+        run: pyinstaller --onefile --windowed --collect-all mne --name NeuroTechGUI${{ runner.os }} GUI.py
 
       - name: Build .app Bundle (macOS)
         if: runner.os == 'macOS'
-        # Added --collect-all mne here as well
-        run: pyinstaller --windowed --collect-all mne --name my_app_macOS GUI.py
+        run: pyinstaller --windowed --collect-all mne --name NeuroTechGUI GUI.py
 
-      - name: Zip the macOS .app Bundle
+      - name: Install Apple Certificate
         if: runner.os == 'macOS'
-        # Since GitHub Releases can't host folders, we zip the .app bundle for users to download
+        env:
+          CERT_BASE64: ${{ secrets.MAC_CERTS_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
         run: |
-          cd dist
-          zip -r my_app_macOS.zip my_app_macOS.app
-          rm -rf my_app_macOS.app # Deletes the raw folder so only the .zip gets uploaded
+          # Create a temporary keychain
+          CERT_PATH=$RUNNER_TEMP/build_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          echo -n "$CERT_BASE64" | base64 --decode -o $CERT_PATH
+          security create-keychain -p "actions" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "actions" $KEYCHAIN_PATH
+          # Import certificate to keychain
+          security import $CERT_PATH -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+          
+      - name: Sign the macOS App
+        if: runner.os == 'macOS'
+        run: |
+          # --options runtime enables the "Hardened Runtime" (mandatory for notarization)
+          # --deep ensures all hidden dependencies (like mne's math libraries) are signed
+          codesign --deep --force --options runtime --sign "Developer ID Application" dist/NeuroTechGUI.app
+
+      - name: Zip for Notarization
+        if: runner.os == 'macOS'
+        run: |
+          # Using 'ditto' instead of 'zip' preserves critical Mac resource forks and signatures
+          /usr/bin/ditto -c -k --keepParent dist/NeuroTechGUI.app dist/NeuroTechGUI.zip
+
+      - name: Notarize the App
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Submit the zip to Apple and wait for the results
+          xcrun notarytool submit dist/NeuroTechGUI.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID" \
+            --wait
+
+      - name: Staple the Ticket and Final Zip
+        if: runner.os == 'macOS'
+        run: |
+          # Attach the approval ticket directly to the .app bundle
+          xcrun stapler staple dist/NeuroTechGUI.app
+          # Delete the old zip and create a new one containing the fully stapled app
+          rm dist/NeuroTechGUI.zip
+          /usr/bin/ditto -c -k --keepParent dist/NeuroTechGUI.app dist/NeuroTechGUI.zip
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
