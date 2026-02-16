@@ -19,7 +19,6 @@ import platform
 import time
 from datetime import datetime
 import os 
-from pylsl import StreamInfo, StreamOutlet, local_clock
 
 # Serial port imports
 try:
@@ -41,18 +40,29 @@ except ImportError:
 
 # LSL imports
 try:
+    from pylsl import StreamInfo, StreamOutlet, local_clock, cf_float32, cf_string
     LSL_AVAILABLE = True
 except ImportError:
     LSL_AVAILABLE = False
+    # Define dummy values if import fails
+    StreamInfo = None
+    StreamOutlet = None
+    local_clock = None
+    cf_float32 = None
+    cf_string = None
     print("Warning: pylsl not available. Install with: pip install pylsl")
 
 # BrainFlow imports
 try:
     from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
     BRAINFLOW_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     BRAINFLOW_AVAILABLE = False
-    print("Warning: BrainFlow not available. Install with: pip install brainflow")
+    BoardShim = None
+    BrainFlowInputParams = None
+    BoardIds = None
+    print(f"Warning: BrainFlow not available. Install with: pip install brainflow")
+    print(f"Import error details: {e}")
 
 # Import your data loading functions
 from conversions import get_gdf_array, get_pkl_array
@@ -399,7 +409,7 @@ class SegmentViewer(QMainWindow):
         self.smooth_checkbox.setChecked(True)
         self.smooth_checkbox.stateChanged.connect(self.on_smooth_checkbox_changed)
         smooth_layout.addWidget(self.smooth_checkbox)
-        self.smooth_slider = QSlider(Qt.Horizontal)
+        self.smooth_slider = QSlider(Qt.Orientation.Horizontal)
         self.smooth_slider.setMinimum(1)    # 10 ms
         self.smooth_slider.setMaximum(20)   # 200 ms
         self.smooth_slider.setValue(12)     # Default 120 ms
@@ -469,7 +479,7 @@ class SegmentViewer(QMainWindow):
         vertical_zoom_layout.setContentsMargins(0, 0, 0, 0)
         
         # Vertical zoom slider (Y-axis zoom)
-        self.vertical_zoom_slider = QSlider(Qt.Vertical)
+        self.vertical_zoom_slider = QSlider(Qt.Orientation.Vertical)
         self.vertical_zoom_slider.setMinimum(10)  # 10% zoom (zoomed out)
         self.vertical_zoom_slider.setMaximum(500)  # 500% zoom (zoomed in)
         self.vertical_zoom_slider.setValue(100)  # 100% = normal
@@ -521,7 +531,7 @@ class SegmentViewer(QMainWindow):
         horizontal_zoom_layout.setContentsMargins(0, 0, 0, 0)
         
         horizontal_zoom_layout.addWidget(QLabel("Window Length:"))
-        self.horizontal_zoom_slider = QSlider(Qt.Horizontal)
+        self.horizontal_zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.horizontal_zoom_slider.setMinimum(10)  # 0.1 seconds minimum
         self.horizontal_zoom_slider.setMaximum(600)  # 60.0 seconds maximum
         self.horizontal_zoom_slider.setValue(int(self.window_size_sec * 10))  # Scale by 10 for finer control
@@ -561,7 +571,7 @@ class SegmentViewer(QMainWindow):
         self.play_pause_btn.clicked.connect(self.on_spacebar)
         self.play_pause_btn.setEnabled(False)  # Disabled until file loaded
         self.play_pause_btn.setMaximumWidth(130)
-        self.play_pause_btn.setFocusPolicy(Qt.ClickFocus)
+        self.play_pause_btn.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         horizontal_zoom_layout.addWidget(self.play_pause_btn)
 
         # Playback speed
@@ -611,7 +621,7 @@ class SegmentViewer(QMainWindow):
         
         # Create initial "no file" message
         self.no_file_label = QLabel("No file loaded\n\nClick 'Load File' to begin")
-        self.no_file_label.setAlignment(Qt.AlignCenter)
+        self.no_file_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.no_file_label.setStyleSheet("font-size: 24px; color: gray;")
         self.plot_layout.addWidget(self.no_file_label)
         
@@ -621,7 +631,7 @@ class SegmentViewer(QMainWindow):
 
         # Slider
         nav_layout.addWidget(QLabel("Window:"))
-        self.slider = QSlider(Qt.Horizontal)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setMinimum(0)
         self.slider.setMaximum(0)
         self.slider.setValue(0)
@@ -677,10 +687,10 @@ class SegmentViewer(QMainWindow):
         # Buttons accept click focus (so clicking them deselects spinboxes) but
         # the QShortcut below intercepts spacebar before any button can process it
         for btn in self.findChildren(QPushButton):
-            btn.setFocusPolicy(Qt.ClickFocus)
+            btn.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
         # Global spacebar shortcut for play/pause or start/stop streaming
-        spacebar_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
+        spacebar_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         spacebar_shortcut.activated.connect(self.on_spacebar)
 
         # Set aspect ratio constraints to preserve display ratio
@@ -872,20 +882,20 @@ class SegmentViewer(QMainWindow):
             # pyqtgraph passes axis=0 for X, axis=1 for Y from AxisItem
             # Also check event orientation for direct wheel events
             if axis == 0:
-                orientation = Qt.Horizontal
+                orientation = Qt.Orientation.Horizontal
             elif axis == 1:
-                orientation = Qt.Vertical
+                orientation = Qt.Orientation.Vertical
             elif hasattr(event, 'orientation'):
                 orientation = event.orientation()
             else:
-                orientation = Qt.Vertical
+                orientation = Qt.Orientation.Vertical
 
-            if orientation == Qt.Horizontal:
+            if orientation == Qt.Orientation.Horizontal:
                 # Horizontal scroll: pan time axis
                 x_range = view_box.viewRange()[0]
                 x_size = x_range[1] - x_range[0]
                 pan_amount = -delta * 0.1 * x_size / 120.0
-                view_box.setXRange(x_range[0] + pan_amount, x_range[1] + pan_amount, padding=0)
+                view_box.setXRange(x_range[0] + pan_amount, x_range[1] + pan_amount, 0)
             else:
                 # Vertical scroll: adjust per-channel amplitude scale
                 notches = delta // 120
@@ -1156,9 +1166,9 @@ class SegmentViewer(QMainWindow):
         if hasattr(event, 'orientation'):
             orientation = event.orientation()
         else:
-            orientation = Qt.Vertical
+            orientation = Qt.Orientation.Vertical
         
-        if orientation == Qt.Horizontal:
+        if orientation == Qt.Orientation.Horizontal:
             # Horizontal scroll: Pan time (X) axis left/right
             # Get current view range
             view_range = view_box.viewRange()
@@ -1173,7 +1183,7 @@ class SegmentViewer(QMainWindow):
             pan_amount = -delta * pan_factor * x_size / 120.0  # Normalize delta (typically ±120 per scroll step)
             new_x_min = x_range[0] + pan_amount
             new_x_max = x_range[1] + pan_amount
-            view_box.setXRange(new_x_min, new_x_max, padding=0)
+            view_box.setXRange(new_x_min, new_x_max)
         # else: ignore vertical scroll
         
         event.accept()
@@ -1195,7 +1205,7 @@ class SegmentViewer(QMainWindow):
                 # In streaming mode, zoom based on magnitude scale setting
                 base_range = self.magnitude_scale  # microvolts
                 y_range = base_range / zoom_factor
-                self.plot_widget.setYRange(-y_range, y_range, padding=0)
+                self.plot_widget.setYRange(-y_range, y_range)
             elif self.file_loaded:
                 # File mode: use pre-calculated channel bounds
                 y_min, y_max = self.get_bounds_for_channels(self.active_channels)
@@ -1204,7 +1214,7 @@ class SegmentViewer(QMainWindow):
 
                 new_y_min = y_center - y_range / 2.0
                 new_y_max = y_center + y_range / 2.0
-                self.plot_widget.setYRange(new_y_min, new_y_max, padding=0)
+                self.plot_widget.setYRange(new_y_min, new_y_max)
         else:
             # Stacked mode: scale signal amplitude within each channel lane
             # Lane spacing stays fixed; signals get bigger/smaller within their lanes
@@ -1348,9 +1358,9 @@ class SegmentViewer(QMainWindow):
 
         # Set the new view range (this will trigger range_changed signal which updates window controls)
         if self.display_mode == 'overlay':
-            self.plot_widget.setXRange(t_start, t_end, padding=0)
+            self.plot_widget.setXRange(t_start, t_end)
         else:
-            self.stacked_plot_item.setXRange(t_start, t_end, padding=0)
+            self.stacked_plot_item.setXRange(t_start, t_end)
     
     def on_window_size_spinbox_changed(self, value):
         """Handle window size spinbox changes"""
@@ -1412,9 +1422,9 @@ class SegmentViewer(QMainWindow):
 
         # Set the new view range (this will trigger range_changed signal which updates window controls)
         if self.display_mode == 'overlay':
-            self.plot_widget.setXRange(t_start, t_end, padding=0)
+            self.plot_widget.setXRange(t_start, t_end)
         else:
-            self.stacked_plot_item.setXRange(t_start, t_end, padding=0)
+            self.stacked_plot_item.setXRange(t_start, t_end)
     
     def on_sampling_rate_changed(self, value):
         """Handle sampling rate spinbox changes"""
@@ -1436,7 +1446,7 @@ class SegmentViewer(QMainWindow):
         """Toggle channel visibility"""
         if not self.file_loaded and not self.streaming_active:
             return
-        if state == Qt.Checked:
+        if state == Qt.CheckState.Checked:
             self.active_channels.add(channel_idx)
         else:
             self.active_channels.discard(channel_idx)
@@ -1448,7 +1458,7 @@ class SegmentViewer(QMainWindow):
         elif len(self.active_channels) == 0:
             self.select_all_checkbox.setChecked(False)
         else:
-            self.select_all_checkbox.setCheckState(Qt.PartiallyChecked)
+            self.select_all_checkbox.setCheckState(Qt.CheckState.PartiallyChecked)
         self.select_all_checkbox.blockSignals(False)
 
         self.update_selected_channels_label()
@@ -1525,10 +1535,10 @@ class SegmentViewer(QMainWindow):
         # Only set Y range when channels change, not on every window update
         if set_y_range:
             y_min, y_max = self.get_bounds_for_channels(self.active_channels)
-            self.plot_widget.setYRange(y_min, y_max, padding=0)
+            self.plot_widget.setYRange(y_min, y_max)
         
         # Set X-axis range to show current window
-        self.plot_widget.setXRange(t_start, t_end, padding=0)
+        self.plot_widget.setXRange(t_start, t_end)
         
         self.plot_widget.addLegend()
     
@@ -1652,10 +1662,10 @@ class SegmentViewer(QMainWindow):
         # Set Y range: d/2 above topmost channel, d/2 below bottommost
         y_top = d
         y_bottom = -num_active * d
-        self.stacked_plot_item.setYRange(y_bottom, y_top, padding=0)
+        self.stacked_plot_item.setYRange(y_bottom, y_top, 0)
 
         # Set X range to current window
-        self.stacked_plot_item.setXRange(t_start, t_end, padding=0)
+        self.stacked_plot_item.setXRange(t_start, t_end, 0)
     
     def on_stacked_range_changed(self):
         """Called when user pans in stacked mode - updates visible data"""
@@ -1721,10 +1731,10 @@ class SegmentViewer(QMainWindow):
         
         # Set X-axis range to new window
         if self.display_mode == 'overlay':
-            self.plot_widget.setXRange(t_start, t_end, padding=0)
+            self.plot_widget.setXRange(t_start, t_end)
         else:
             if self.stacked_plot_item is not None:
-                self.stacked_plot_item.setXRange(t_start, t_end, padding=0)
+                self.stacked_plot_item.setXRange(t_start, t_end)
         
         # Update plot data and apply zoom
         self.update_plot()
@@ -1770,19 +1780,19 @@ class SegmentViewer(QMainWindow):
         
         if self.display_mode == 'overlay':
             # Reset to show current window time range and bounds
-            self.plot_widget.setYRange(y_min, y_max, padding=0)
-            self.plot_widget.setXRange(t_start, t_end, padding=0)
+            self.plot_widget.setYRange(y_min, y_max)
+            self.plot_widget.setXRange(t_start, t_end)
         else:
             # Stacked mode: reset total_y_span and amplitude scale
             if self.stacked_plot_item is not None:
                 self.total_y_span = 1600.0  # Reset to default
                 self.channel_amplitude_scale = 1.0
-                self.stacked_plot_item.setXRange(t_start, t_end, padding=0)
+                self.stacked_plot_item.setXRange(t_start, t_end)
                 num_active = len(self.active_channels)
                 d = self.compute_channel_spacing(num_active)
                 y_top = d
                 y_bottom = -num_active * d
-                self.stacked_plot_item.setYRange(y_bottom, y_top, padding=0)
+                self.stacked_plot_item.setYRange(y_bottom, y_top)
 
     def on_spacebar(self):
         """Handle spacebar: dispatches to file play/pause or streaming start/stop"""
@@ -1862,14 +1872,14 @@ class SegmentViewer(QMainWindow):
         self.plot_widget.setUpdatesEnabled(False)
 
         if self.display_mode == 'overlay':
-            self.plot_widget.setXRange(t_start, t_end, padding=0)
+            self.plot_widget.setXRange(t_start, t_end)
             for ch_idx in sorted(self.active_channels):
                 if ch_idx in self.overlay_plot_items:
                     data = self.raw_data[ch_idx, start_idx:end_idx]
                     self.overlay_plot_items[ch_idx].setData(time_slice, data)
         else:
             if self.stacked_plot_item is not None:
-                self.stacked_plot_item.setXRange(t_start, t_end, padding=0)
+                self.stacked_plot_item.setXRange(t_start, t_end)
 
             active_list = sorted(self.active_channels)
             num_active = len(active_list)
@@ -2142,7 +2152,7 @@ class SegmentViewer(QMainWindow):
                 type='EEG',
                 channel_count=self.num_channels,
                 nominal_srate=self.sampling_rate,
-                channel_format='float32',
+                channel_format=cf_float32,
                 source_id=f'eeg_headset_{self.patient_id}'
             )
 
@@ -2200,7 +2210,7 @@ class SegmentViewer(QMainWindow):
                 type='Markers',
                 channel_count=1,
                 nominal_srate=0,  # Irregular rate for markers
-                channel_format='string',
+                channel_format=cf_string,
                 source_id=f'markers_{self.patient_id}'
             )
 
@@ -2529,7 +2539,7 @@ class SegmentViewer(QMainWindow):
                 # Set Y range: one full gap above topmost, one below bottommost
                 y_top = d
                 y_bottom = -num_active * d
-                self.stacked_plot_item.setYRange(y_bottom, y_top, padding=0)
+                self.stacked_plot_item.setYRange(y_bottom, y_top)
 
             else:
                 # Just update data (fast path)
@@ -2541,7 +2551,7 @@ class SegmentViewer(QMainWindow):
 
             # Update scale label and fix X range to full buffer window
             self.stacked_plot_item.setLabel('left', f'Scale: {d:.1f}')
-            self.stacked_plot_item.setXRange(0, self.stream_time_axis[-1], padding=0)
+            self.stacked_plot_item.setXRange(0, self.stream_time_axis[-1])
 
         elif hasattr(self, 'plot_widget') and self.plot_widget is not None:
             # Overlay mode (original behavior)
@@ -2720,7 +2730,7 @@ class SegmentViewer(QMainWindow):
             self.band_power_bar_item.setOpts(height=band_values, brush=bar_color)
 
         # Lock Y-axis to stable max with 10% headroom
-        self.band_power_plot_widget.setYRange(0, self.band_power_y_max * 1.1, padding=0)
+        self.band_power_plot_widget.setYRange(0, self.band_power_y_max * 1.1)
 
     def motor_imagery_task_placeholder(self):
         """Placeholder for motor imagery task - to be integrated later"""
@@ -2750,12 +2760,12 @@ class SegmentViewer(QMainWindow):
 
     def on_smooth_checkbox_changed(self, state):
         """Enable or disable smoothing"""
-        self.smoothing_enabled = (state == Qt.Checked)
+        self.smoothing_enabled = (state == Qt.CheckState.Checked)
         self.smooth_slider.setEnabled(self.smoothing_enabled)
 
     def toggle_all_channels(self, state):
         """Toggle all channel checkboxes"""
-        is_checked = (state == Qt.Checked)
+        is_checked = (state == Qt.CheckState.Checked)
         for cb in self.channel_checkboxes:
             cb.blockSignals(True)
             cb.setChecked(is_checked)
@@ -2792,6 +2802,9 @@ class SegmentViewer(QMainWindow):
     def apply_theme(self):
         """Apply the selected theme to the application"""
         app = QApplication.instance()
+        
+        if app is None:
+            return
 
         if self.theme == 'dark':
             # Sleek dark theme
@@ -2808,7 +2821,7 @@ class SegmentViewer(QMainWindow):
             dark_palette.setColor(QPalette.BrightText, QColor(255, 100, 100))
             dark_palette.setColor(QPalette.Link, QColor(80, 160, 255))
             dark_palette.setColor(QPalette.Highlight, QColor(70, 130, 220))
-            dark_palette.setColor(QPalette.HighlightedText, Qt.white)
+            dark_palette.setColor(QPalette.HighlightedText, Qt.GlobalColor.white)
             dark_palette.setColor(QPalette.Disabled, QPalette.Text, QColor(100, 100, 100))
             dark_palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(100, 100, 100))
             app.setPalette(dark_palette)
@@ -2843,7 +2856,11 @@ class SegmentViewer(QMainWindow):
 
         else:
             # Light theme
-            app.setPalette(QApplication.style().standardPalette())
+            style = QApplication.style()
+            if style is not None:
+                palette = style.standardPalette()
+                if palette is not None:
+                    app.setPalette(palette)
             pg.setConfigOption('background', 'w')
             pg.setConfigOption('foreground', 'k')
 
@@ -3051,7 +3068,7 @@ class SegmentViewer(QMainWindow):
             self.band_power_bar_item.setOpts(height=band_values, brush=bar_color)
 
         # Lock Y-axis to stable max with 10% headroom
-        self.band_power_plot_widget.setYRange(0, self.band_power_y_max * 1.1, padding=0)
+        self.band_power_plot_widget.setYRange(0, self.band_power_y_max * 1.1)
 
 
 def main():
