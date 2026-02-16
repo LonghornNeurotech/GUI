@@ -6,15 +6,14 @@ Displays segmented EEG data with channel selection and window navigation
 import sys
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QCheckBox, QSlider, QSpinBox, QPushButton, QLabel, QGroupBox,
     QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QRadioButton, QButtonGroup,
     QFileDialog, QMessageBox, QComboBox, QLineEdit, QTabWidget, QMenu, QWidgetAction, QScrollArea
 )
-from PyQt5.QtCore import Qt, QTimer, QSize
-from PyQt5.QtGui import QPalette, QColor, QKeySequence
-from PyQt5.QtWidgets import QShortcut
+from PyQt6.QtCore import Qt, QTimer, QSize
+from PyQt6.QtGui import QPalette, QColor, QKeySequence, QShortcut
 import platform
 import time
 from datetime import datetime
@@ -143,7 +142,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(theme_group)
 
         # Dialog buttons
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -162,8 +161,20 @@ class SettingsDialog(QDialog):
 class SegmentViewer(QMainWindow):
     def __init__(self, window_size_sec=10.0, sampling_rate=125):
         super().__init__()
-        # Enable OpenGL acceleration and antialiasing for smoother rendering
-        pg.setConfigOptions(useOpenGL=False, antialias=True)
+        # Try OpenGL for GPU-accelerated rendering (much smoother for real-time EEG).
+        # Packaged macOS .app bundles sometimes can't access the system OpenGL
+        # framework, so fall back to software QPainter rendering if it fails.
+        try:
+            from PyQt6.QtGui import QOpenGLContext
+            ctx = QOpenGLContext()
+            if ctx.create():
+                pg.setConfigOptions(useOpenGL=True, antialias=True)
+                print("OpenGL acceleration enabled")
+            else:
+                raise RuntimeError("Could not create OpenGL context")
+        except Exception as e:
+            pg.setConfigOptions(useOpenGL=False, antialias=True)
+            print(f"OpenGL not available — using software rendering ({e})")
 
         self.raw_data = None  # No data loaded initially
         self.window_size_sec = window_size_sec
@@ -483,7 +494,7 @@ class SegmentViewer(QMainWindow):
         self.vertical_zoom_slider.setMinimum(10)  # 10% zoom (zoomed out)
         self.vertical_zoom_slider.setMaximum(500)  # 500% zoom (zoomed in)
         self.vertical_zoom_slider.setValue(100)  # 100% = normal
-        self.vertical_zoom_slider.setTickPosition(QSlider.TicksRight)
+        self.vertical_zoom_slider.setTickPosition(QSlider.TickPosition.TicksRight)
         self.vertical_zoom_slider.setTickInterval(50)
         self.vertical_zoom_slider.valueChanged.connect(self.on_vertical_zoom_slider_changed)
         self.vertical_zoom_slider.setEnabled(False)  # Disabled until file loaded
@@ -535,7 +546,7 @@ class SegmentViewer(QMainWindow):
         self.horizontal_zoom_slider.setMinimum(10)  # 0.1 seconds minimum
         self.horizontal_zoom_slider.setMaximum(600)  # 60.0 seconds maximum
         self.horizontal_zoom_slider.setValue(int(self.window_size_sec * 10))  # Scale by 10 for finer control
-        self.horizontal_zoom_slider.setTickPosition(QSlider.TicksBelow)
+        self.horizontal_zoom_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.horizontal_zoom_slider.setTickInterval(50)
         self.horizontal_zoom_slider.valueChanged.connect(self.on_horizontal_zoom_changed)
         self.horizontal_zoom_slider.setEnabled(False)  # Disabled until file loaded
@@ -1446,7 +1457,9 @@ class SegmentViewer(QMainWindow):
         """Toggle channel visibility"""
         if not self.file_loaded and not self.streaming_active:
             return
-        if state == Qt.CheckState.Checked:
+        # PyQt6 stateChanged emits int, not Qt.CheckState — convert before comparing
+        check_state = Qt.CheckState(state) if isinstance(state, int) else state
+        if check_state == Qt.CheckState.Checked:
             self.active_channels.add(channel_idx)
         else:
             self.active_channels.discard(channel_idx)
@@ -1915,7 +1928,7 @@ class SegmentViewer(QMainWindow):
     def open_settings_dialog(self):
         """Open dialog to configure application settings"""
         dialog = SettingsDialog(self.display_mode, self.theme, self)
-        if dialog.exec_() == QDialog.Accepted:
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             new_mode = dialog.get_mode()
             new_theme = dialog.get_theme()
 
@@ -1998,9 +2011,9 @@ class SegmentViewer(QMainWindow):
                     self,
                     "No Headset Found",
                     "No headset detected. Use synthetic board for testing?",
-                    QMessageBox.Yes | QMessageBox.No
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
                 )
-                if response == QMessageBox.Yes:
+                if response == QMessageBox.StandardButton.Yes:
                     self.board_id = BoardIds.SYNTHETIC_BOARD.value
                     params = BrainFlowInputParams()
                 else:
@@ -2760,12 +2773,16 @@ class SegmentViewer(QMainWindow):
 
     def on_smooth_checkbox_changed(self, state):
         """Enable or disable smoothing"""
-        self.smoothing_enabled = (state == Qt.CheckState.Checked)
+        # PyQt6 stateChanged emits int, not Qt.CheckState — convert before comparing
+        check_state = Qt.CheckState(state) if isinstance(state, int) else state
+        self.smoothing_enabled = (check_state == Qt.CheckState.Checked)
         self.smooth_slider.setEnabled(self.smoothing_enabled)
 
     def toggle_all_channels(self, state):
         """Toggle all channel checkboxes"""
-        is_checked = (state == Qt.CheckState.Checked)
+        # PyQt6 stateChanged emits int, not Qt.CheckState — convert before comparing
+        check_state = Qt.CheckState(state) if isinstance(state, int) else state
+        is_checked = (check_state == Qt.CheckState.Checked)
         for cb in self.channel_checkboxes:
             cb.blockSignals(True)
             cb.setChecked(is_checked)
@@ -2809,21 +2826,21 @@ class SegmentViewer(QMainWindow):
         if self.theme == 'dark':
             # Sleek dark theme
             dark_palette = QPalette()
-            dark_palette.setColor(QPalette.Window, QColor(30, 30, 30))
-            dark_palette.setColor(QPalette.WindowText, QColor(230, 230, 230))
-            dark_palette.setColor(QPalette.Base, QColor(25, 25, 25))
-            dark_palette.setColor(QPalette.AlternateBase, QColor(35, 35, 35))
-            dark_palette.setColor(QPalette.ToolTipBase, QColor(50, 50, 50))
-            dark_palette.setColor(QPalette.ToolTipText, QColor(230, 230, 230))
-            dark_palette.setColor(QPalette.Text, QColor(230, 230, 230))
-            dark_palette.setColor(QPalette.Button, QColor(45, 45, 45))
-            dark_palette.setColor(QPalette.ButtonText, QColor(230, 230, 230))
-            dark_palette.setColor(QPalette.BrightText, QColor(255, 100, 100))
-            dark_palette.setColor(QPalette.Link, QColor(80, 160, 255))
-            dark_palette.setColor(QPalette.Highlight, QColor(70, 130, 220))
-            dark_palette.setColor(QPalette.HighlightedText, Qt.GlobalColor.white)
-            dark_palette.setColor(QPalette.Disabled, QPalette.Text, QColor(100, 100, 100))
-            dark_palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(100, 100, 100))
+            dark_palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))
+            dark_palette.setColor(QPalette.ColorRole.WindowText, QColor(230, 230, 230))
+            dark_palette.setColor(QPalette.ColorRole.Base, QColor(25, 25, 25))
+            dark_palette.setColor(QPalette.ColorRole.AlternateBase, QColor(35, 35, 35))
+            dark_palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(50, 50, 50))
+            dark_palette.setColor(QPalette.ColorRole.ToolTipText, QColor(230, 230, 230))
+            dark_palette.setColor(QPalette.ColorRole.Text, QColor(230, 230, 230))
+            dark_palette.setColor(QPalette.ColorRole.Button, QColor(45, 45, 45))
+            dark_palette.setColor(QPalette.ColorRole.ButtonText, QColor(230, 230, 230))
+            dark_palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 100, 100))
+            dark_palette.setColor(QPalette.ColorRole.Link, QColor(80, 160, 255))
+            dark_palette.setColor(QPalette.ColorRole.Highlight, QColor(70, 130, 220))
+            dark_palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
+            dark_palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(100, 100, 100))
+            dark_palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(100, 100, 100))
             app.setPalette(dark_palette)
 
             # Sleek dark plots
@@ -3080,7 +3097,7 @@ def main():
     
     viewer = SegmentViewer()
     viewer.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

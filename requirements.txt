@@ -20,7 +20,7 @@ platformdirs==4.9.1
 pooch==1.9.0
 pylsl==1.18.1
 pyparsing==3.3.2
-PyQt5==5.15.11
+PyQt6==6.9.0
 pyqtgraph==0.14.0
 pyserial==3.5
 python-dateutil==2.9.0.post0
