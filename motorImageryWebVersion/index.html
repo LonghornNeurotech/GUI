@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neural Data Acquisition</title>
+</head>
+<body>
+    <div id="app-container">
+        <div id="welcome-screen" class="screen">
+            <div class="header-container">
+                <div class="logo-wrapper">
+                    <div class="hex-outer"></div>
+                    <div class="hex-inner"></div>
+                    <div class="core-dot"></div>
+                </div>
+                <h1 class="main-title">Welcome<br>Data acquisition</h1>
+                <p class="sub-title">Subject Data</p>
+            </div>
+            
+            <div class="glass-card scrollable">
+                <div class="input-row">
+                    <label>Subject ID</label>
+                    <input type="text" id="subName" placeholder="SUB_001">
+                </div>
+                
+                <div class="input-row align-top">
+                    <label>Substance Usage</label>
+                    <div class="input-content-wrapper">
+                        <div class="checkbox-group">
+                            <label><input type="checkbox" value="Caffeine" onchange="toggleDetails(this)"> Caffeine</label>
+                            <label><input type="checkbox" value="Alcohol" onchange="toggleDetails(this)"> Alcohol</label>
+                            <button onclick="addOtherSubstance()" class="btn-small">+ Add Other</button>
+                        </div>
+                        <div id="substance-details-container"></div>
+                    </div>
+                </div>
+
+                <div class="input-row">
+                    <label>Last Meal (hrs)</label>
+                    <input type="number" id="subMeal" value="0">
+                </div>
+                <button onclick="showInstructions()" class="btn-primary">Initialize Link</button>
+            </div>
+        </div>
+
+        <div id="instruction-screen" class="screen" style="display:none;">
+            <h1 class="main-title" style="color:var(--accent); margin-bottom:20px;">Protocol Guide</h1>
+            <div class="glass-card instruction-text">
+                <div class="guide-item"><span>STEP 1</span> Focus gaze on <b>central crosshair</b>.</div>
+                <div class="guide-item"><span>STEP 2</span> <b>BLINKING:</b> Only during <b>REST</b> (circular countdown).</div>
+                <div class="guide-item"><span>STEP 3</span> <b>CUE:</b> Imagine the movement as the L/R letters fill.</div>
+                <div class="guide-item"><span>STEP 4</span> Relax during the 1-minute mindfulness phase.</div>
+                <button onclick="startMindfulness()" class="btn-primary accent">Enter Mindfulness Phase</button>
+            </div>
+        </div>
+
+        <div id="mindfulness-screen" class="screen mindfulness-bg" style="display:none;">
+            <div class="mindfulness-overlay"></div>
+            <div class="mindfulness-content">
+                <h1 class="main-title">Mindfulness</h1>
+                <p class="sub-title" style="color: #fff; letter-spacing: 6px;">Relax your mind</p>
+                <div class="mindfulness-ui-wrapper">
+                    <svg class="progress-ring" width="240" height="240">
+                        <circle class="progress-ring__bg" stroke="rgba(255,255,255,0.2)" stroke-width="10" fill="transparent" r="100" cx="120" cy="120"/>
+                        <circle id="mindfulness-circle" class="progress-ring__circle" stroke="var(--accent)" stroke-width="10" fill="transparent" r="100" cx="120" cy="120"/>
+                    </svg>
+                    <div class="timer-display" id="mindfulness-timer">60</div>
+                </div>
+                <p class="mindfulness-text">Clear your thoughts. Breathe deeply. Remain still.</p>
+            </div>
+        </div>
+
+        <canvas id="testCanvas" style="display:none;"></canvas>
+
+        <div id="closing-screen" class="screen" style="display:none;">
+            <div class="glass-card">
+                <h1 style="color:var(--accent)">Sync Complete</h1>
+                <p id="data-log">Neural mapping finalized.</p>
+                <button onclick="resetToHome()" class="btn-outline">Return to Terminal</button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
