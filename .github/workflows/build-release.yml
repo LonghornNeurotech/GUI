@@ -96,11 +96,7 @@ jobs:
         run: |
           # --options runtime enables the "Hardened Runtime" (mandatory for notarization)
           # --deep ensures all hidden dependencies (like mne's math libraries) are signed
-          # --entitlements grants JIT / unsigned-memory permissions required by QtWebEngine (V8)
-          codesign --deep --force --options runtime \
-            --entitlements entitlements.plist \
-            --sign "Developer ID Application" \
-            dist/NeuroTechGUI_macOS.app
+          codesign --deep --force --options runtime --sign "Developer ID Application" dist/NeuroTechGUI_macOS.app
 
       - name: Zip for Notarization
         if: runner.os == 'macOS'
