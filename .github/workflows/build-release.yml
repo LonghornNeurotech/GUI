@@ -40,7 +40,7 @@ jobs:
 
       - name: Inject build version
         run: |
-          python -c "with open('version.py','w') as f: f.write('CURRENT_VERSION = \"build-${{ github.run_number }}\"\n')"
+          echo "CURRENT_VERSION = \"build-${{ github.run_number }}\"" > version.py
 
       - name: Build Executable (Windows & Linux)
         if: runner.os != 'macOS'
