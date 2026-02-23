@@ -4,6 +4,13 @@ Displays segmented EEG data with channel selection and window navigation
 """
 
 import sys
+import os
+
+# Must be set before any Qt/Chromium objects are created.
+# Tells V8 to skip JIT compilation, avoiding the large CodeRange virtual-memory
+# reservation that fails inside PyInstaller / hardened-runtime builds.
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--js-flags=--jitless")
+
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (
@@ -20,7 +27,6 @@ from datetime import datetime
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtCore import QUrl, pyqtSlot, QObject
-import os
 
 
 def resource_path(relative_path):
@@ -75,6 +81,9 @@ except ImportError as e:
 
 # Import your data loading functions
 from conversions import get_gdf_array, get_pkl_array
+
+# Auto-updater
+from updater import prompt_update_if_available
 
 
 def find_headset_port():
@@ -3198,7 +3207,11 @@ def main():
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
-    
+
+    # Check for updates before showing the main window.
+    # If an update is applied the process will exit inside prompt_update_if_available.
+    prompt_update_if_available()
+
     viewer = SegmentViewer()
     viewer.show()
     sys.exit(app.exec())
