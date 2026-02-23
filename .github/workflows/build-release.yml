@@ -8,6 +8,10 @@ on:
       - '**.py'                                  # Any Python file anywhere in the repo
       - 'requirements.txt'                       # Changes to your dependencies
       - '.github/workflows/build-release.yml'    # Changes to this workflow file itself
+      - '*.html'                                 # Web UI markup
+      - '*.js'                                   # Web UI scripts
+      - '*.css'                                  # Web UI styles
+      - '*.jpg'                                  # Bundled images (e.g. beach.jpg)
 
 jobs:
   build:
@@ -40,8 +44,10 @@ jobs:
           --collect-all mne --collect-all brainflow --collect-all pylsl
           --hidden-import=PyQt6.QtOpenGL
           --hidden-import=PyQt6.QtOpenGLWidgets
-          --hidden-import=PyQt6.sip
-          --name NeuroTechGUI_${{ runner.os }} GUI.py
+          --hidden-import=PyQt6.sipa          --add-data "index.html${{ runner.os == 'Windows' && ';' || ':' }}."
+          --add-data "app.js${{ runner.os == 'Windows' && ';' || ':' }}."
+          --add-data "styles.css${{ runner.os == 'Windows' && ';' || ':' }}."
+          --add-data "beach.jpg${{ runner.os == 'Windows' && ';' || ':' }}."          --name NeuroTechGUI_${{ runner.os }} GUI.py
 
       - name: Build .app Bundle (macOS)
         if: runner.os == 'macOS'
@@ -51,6 +57,10 @@ jobs:
           --hidden-import=PyQt6.QtOpenGL
           --hidden-import=PyQt6.QtOpenGLWidgets
           --hidden-import=PyQt6.sip
+          --add-data "index.html:."
+          --add-data "app.js:."
+          --add-data "styles.css:."
+          --add-data "beach.jpg:."
           --name NeuroTechGUI_macOS GUI.py
 
       - name: Install Apple Certificate

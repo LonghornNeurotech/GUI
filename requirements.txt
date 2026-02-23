@@ -30,3 +30,4 @@ setuptools==80.9.0
 six==1.17.0
 tqdm==4.67.3
 urllib3==2.6.3
+pyqt6-webengine==6.10.0

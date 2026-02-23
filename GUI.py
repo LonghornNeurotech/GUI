@@ -17,7 +17,17 @@ from PyQt6.QtGui import QPalette, QColor, QKeySequence, QShortcut
 import platform
 import time
 from datetime import datetime
-import os 
+from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebChannel import QWebChannel
+from PyQt6.QtCore import QUrl, pyqtSlot, QObject
+import os
+
+
+def resource_path(relative_path):
+    """Get the absolute path to a bundled resource (works for dev and PyInstaller)."""
+    base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
 
 # Serial port imports
 try:
@@ -157,6 +167,91 @@ class SettingsDialog(QDialog):
         """Return selected theme"""
         return 'light' if self.light_theme_radio.isChecked() else 'dark'
 
+class TaskWebBridge(QObject):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+
+    # The @pyqtSlot decorator exposes this function to JavaScript
+    @pyqtSlot(str)
+    def send_marker(self, marker_val):
+        """Receive a structured marker string from the web UI and push it via LSL.
+
+        The JS side sends JSON like: {"stop": "BLINK", "start": "LEFT"}
+        """
+        print(f"[Marker] {marker_val}")
+
+        # Send marker via LSL if the stream is active
+        if self.main_window.marker_outlet is not None and LSL_AVAILABLE:
+            self.main_window.marker_outlet.push_sample([marker_val])
+
+    @pyqtSlot(str)
+    def start_streams(self, patient_id):
+        """Called from JS when the recording task begins.
+
+        Automatically creates EEG and Marker LSL outlets using the
+        patient_id entered in the web form, so the user doesn't have
+        to start them manually from the streaming panel.
+        """
+        mw = self.main_window
+        patient_id = patient_id.strip()
+        if not patient_id:
+            patient_id = "UNKNOWN"
+
+        mw.patient_id = patient_id
+        mw.trial_number = mw.trial_spinbox.value()
+
+        # --- EEG outlet ---
+        if mw.eeg_outlet is None and LSL_AVAILABLE and mw.board is not None:
+            try:
+                stream_name = f"EEG_{patient_id}_Trial{mw.trial_number:04d}"
+                info = StreamInfo(
+                    name=stream_name,
+                    type='EEG',
+                    channel_count=mw.num_channels,
+                    nominal_srate=mw.sampling_rate,
+                    channel_format=cf_float32,
+                    source_id=f'eeg_headset_{patient_id}'
+                )
+                mw.eeg_outlet = StreamOutlet(info)
+                mw.eeg_stream_status.setText(f"EEG Stream: Active - {stream_name}")
+                mw.eeg_stream_status.setStyleSheet("color: green; font-weight: bold;")
+                mw.start_eeg_stream_btn.setText("Stop EEG Stream")
+                mw.start_eeg_stream_btn.clicked.disconnect()
+                mw.start_eeg_stream_btn.clicked.connect(mw.stop_eeg_stream)
+                print(f"LSL EEG Stream auto-started: {stream_name}")
+            except Exception as e:
+                print(f"Failed to auto-start EEG stream: {e}")
+
+        # --- Marker outlet ---
+        if mw.marker_outlet is None and LSL_AVAILABLE:
+            try:
+                stream_name = f"Markers_{patient_id}_Trial{mw.trial_number:04d}"
+                info = StreamInfo(
+                    name=stream_name,
+                    type='Markers',
+                    channel_count=1,
+                    nominal_srate=0,
+                    channel_format=cf_string,
+                    source_id=f'markers_{patient_id}'
+                )
+                mw.marker_outlet = StreamOutlet(info)
+                mw.marker_stream_status.setText(f"Marker Stream: Active - {stream_name}")
+                mw.marker_stream_status.setStyleSheet("color: green; font-weight: bold;")
+                mw.start_marker_stream_btn.setText("Stop Marker Stream")
+                mw.start_marker_stream_btn.clicked.disconnect()
+                mw.start_marker_stream_btn.clicked.connect(mw.stop_marker_stream)
+                print(f"LSL Marker Stream auto-started: {stream_name}")
+            except Exception as e:
+                print(f"Failed to auto-start Marker stream: {e}")
+
+    @pyqtSlot()
+    def stop_streams(self):
+        """Called from JS when the recording session ends."""
+        mw = self.main_window
+        mw.stop_eeg_stream()
+        mw.stop_marker_stream()
+        print("LSL streams stopped by task UI")
 
 class SegmentViewer(QMainWindow):
     def __init__(self, window_size_sec=10.0, sampling_rate=125):
@@ -391,7 +486,7 @@ class SegmentViewer(QMainWindow):
 
         # Motor imagery task button (placeholder)
         self.motor_imagery_btn = QPushButton("Motor Imagery Task")
-        self.motor_imagery_btn.clicked.connect(self.motor_imagery_task_placeholder)
+        self.motor_imagery_btn.clicked.connect(self.motor_imagery_task)
         self.motor_imagery_btn.setEnabled(False)
         self.motor_imagery_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         stream_layout.addWidget(self.motor_imagery_btn)
@@ -2745,18 +2840,27 @@ class SegmentViewer(QMainWindow):
         # Lock Y-axis to stable max with 10% headroom
         self.band_power_plot_widget.setYRange(0, self.band_power_y_max * 1.1)
 
-    def motor_imagery_task_placeholder(self):
-        """Placeholder for motor imagery task - to be integrated later"""
-        QMessageBox.information(
-            self,
-            "Motor Imagery Task",
-            "Motor imagery task integration point.\n\nThis will be connected to your motor imagery task implementation later."
-        )
+    def motor_imagery_task(self):
+        # Create a separate pop-up window for the task
+        self.task_window = QMainWindow(self)
+        self.task_window.setWindowTitle("Neural Data Acquisition Task")
+        self.task_window.resize(1024, 768)
 
-        # Send a marker if marker stream is active
-        if self.marker_outlet is not None and LSL_AVAILABLE:
-            self.marker_outlet.push_sample(['MOTOR_IMAGERY_START'])
-            print("Marker sent: MOTOR_IMAGERY_START")
+        # Create WebEngineView and set it as the central widget
+        self.web_view = QWebEngineView()
+        self.task_window.setCentralWidget(self.web_view)
+
+        # Set up the two-way communication channel
+        self.channel = QWebChannel()
+        self.bridge = TaskWebBridge(self)
+        self.channel.registerObject("pyBridge", self.bridge) # "pyBridge" is the JS name
+        self.web_view.page().setWebChannel(self.channel)
+
+        # Load your local index.html file
+        html_path = resource_path("index.html")
+        self.web_view.setUrl(QUrl.fromLocalFile(html_path))
+
+        self.task_window.show()
 
     def on_magnitude_changed(self, text):
         """Handle magnitude scale change"""

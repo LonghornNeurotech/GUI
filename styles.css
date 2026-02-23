@@ -22,7 +22,7 @@ body { margin: 0; background: var(--bg); color: #e0e0e0; font-family: 'Space Gro
 /* Mindfulness Page (Beach Theme) */
 .mindfulness-bg {
     position: fixed; top: 0; left: 0; width: 100vw !important; height: 100vh !important;
-    background-image: url('https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1920&q=80');
+    background-image: url('beach.jpg');
     background-size: cover; background-position: center; z-index: 100;
 }
 .mindfulness-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.4); z-index: 1; }
