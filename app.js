@@ -16,13 +16,16 @@ let state = "BLINK";
 let previousState = "None";   // for marker bookkeeping
 let cueSide = "";             // current task label when in a task state
 let startTime = 0;
-let rounds = 0;
-const MAX_ROUNDS = 5;         // number of task trials
+let rounds = 0;               // completed trials so far
+let totalTrials = 0;          // cycles × 3 (set at start)
+let numCycles = 5;            // configurable via welcome screen
 const BLINK_DURATION = 4000;  // 4 s blink window
 const TASK_DURATION  = 4000;  // 4 s task window
 
-// Pool of tasks to draw from (randomly shuffled each cycle)
-const TASK_POOL = ["LEFT", "RIGHT", "REST"];
+// Each cycle contains one LEFT, one RIGHT, one REST in random order.
+// taskQueue holds the full flattened sequence of trials.
+let taskQueue = [];
+let taskIndex = 0;
 
 // --- QWebChannel bridge (set once channel is ready) --------------------------
 let pyBridge = null;
@@ -143,8 +146,28 @@ function startMindfulness() {
 }
 
 // --- Task helpers ------------------------------------------------------------
-function pickRandomTask() {
-    return TASK_POOL[Math.floor(Math.random() * TASK_POOL.length)];
+
+/** Shuffle an array in place (Fisher-Yates). */
+function shuffle(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+}
+
+/**
+ * Build the full task queue: `numCycles` cycles, each containing
+ * ["LEFT", "RIGHT", "REST"] in a random order.
+ */
+function buildTaskQueue(cycles) {
+    const queue = [];
+    for (let c = 0; c < cycles; c++) {
+        const cycle = ["LEFT", "RIGHT", "REST"];
+        shuffle(cycle);
+        queue.push(...cycle);
+    }
+    return queue;
 }
 
 function currentDuration() {
@@ -164,6 +187,12 @@ function startTest() {
         pyBridge.start_streams(patientId);
     }
 
+    // Read cycle count from form (clamp to >= 1)
+    numCycles = Math.max(1, parseInt(document.getElementById('numCycles').value, 10) || 5);
+    taskQueue = buildTaskQueue(numCycles);
+    taskIndex = 0;
+    totalTrials = taskQueue.length;  // cycles × 3
+
     // Reset state
     rounds = 0;
     previousState = "None";
@@ -174,7 +203,10 @@ function startTest() {
     // First marker: None → BLINK
     sendMarker("None", "BLINK");
 
-    requestAnimationFrame(update);
+    // Wait for fonts to be ready before drawing on canvas
+    document.fonts.ready.then(() => {
+        requestAnimationFrame(update);
+    });
 }
 
 // --- Main loop ---------------------------------------------------------------
@@ -187,8 +219,9 @@ function update() {
     if (elapsed >= dur) {
         // --- Transition ---
         if (state === "BLINK") {
-            // Move from BLINK → a random task
-            const nextTask = pickRandomTask();
+            // Move from BLINK → next task in the queue
+            const nextTask = taskQueue[taskIndex];
+            taskIndex++;
             previousState = state;
             state = nextTask;
             cueSide = nextTask;
@@ -196,7 +229,7 @@ function update() {
         } else {
             // Move from task → BLINK (or end session)
             rounds++;
-            if (rounds >= MAX_ROUNDS) {
+            if (rounds >= totalTrials) {
                 sendMarker(state, "None");
                 // Stop LSL streams
                 if (pyBridge) { pyBridge.stop_streams(); }
@@ -353,7 +386,8 @@ function draw() {
     ctx.fillStyle = "#222";
     ctx.font = "700 22px 'Space Grotesk'";
     ctx.textAlign = "center";
-    ctx.fillText(`ROUND ${rounds + 1} OF ${MAX_ROUNDS}`, cx, canvas.height - 50);
+    const currentCycle = Math.floor(rounds / 3) + 1;
+    ctx.fillText(`CYCLE ${currentCycle} / ${numCycles}  —  TRIAL ${rounds + 1} / ${totalTrials}`, cx, canvas.height - 50);
 }
 
 // --- Session end -------------------------------------------------------------

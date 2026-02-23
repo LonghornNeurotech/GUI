@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preload" href="SpaceGrotesk.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" type="text/css" href="styles.css">
     <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
     <title>Neural Data Acquisition</title>
@@ -41,6 +42,10 @@
                 <div class="input-row">
                     <label>Last Meal (hrs)</label>
                     <input type="number" id="subMeal" value="0">
+                </div>
+                <div class="input-row">
+                    <label>Number of Cycles</label>
+                    <input type="number" id="numCycles" value="5" min="1" step="1">
                 </div>
                 <button onclick="showInstructions()" class="btn-primary">Initialize Link</button>
             </div>

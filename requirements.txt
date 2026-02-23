@@ -20,7 +20,7 @@ platformdirs==4.9.1
 pooch==1.9.0
 pylsl==1.18.1
 pyparsing==3.3.2
-PyQt6==6.9.0
+PyQt6==6.10.0
 pyqtgraph==0.14.0
 pyserial==3.5
 python-dateutil==2.9.0.post0
@@ -30,4 +30,4 @@ setuptools==80.9.0
 six==1.17.0
 tqdm==4.67.3
 urllib3==2.6.3
-pyqt6-webengine==6.10.0
+PyQt6-WebEngine==6.10.0
