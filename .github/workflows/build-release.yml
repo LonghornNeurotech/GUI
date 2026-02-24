@@ -11,7 +11,9 @@ on:
       - '*.html'                                 # Web UI markup
       - '*.js'                                   # Web UI scripts
       - '*.css'                                  # Web UI styles
-      - '*.jpg'                                  # Bundled images (e.g. beach.jpg)      - '*.png'                                  # Bundled images (e.g. app icon)      - '*.woff2'                                # Bundled fonts
+      - '*.jpg'                                  # Bundled images (e.g. beach.jpg)
+      - '*.png'                                  # Bundled images (e.g. app icon)
+      - '*.woff2'                                # Bundled fonts
 
 jobs:
   build:
@@ -38,8 +40,9 @@ jobs:
           pip install -r requirements.txt
 
       - name: Inject build version
+        shell: bash
         run: |
-          echo "CURRENT_VERSION = \"build-${{ github.run_number }}\"" > version.py
+          echo 'CURRENT_VERSION = "build-${{ github.run_number }}"' > version.py
 
       - name: Build Executable (Windows & Linux)
         if: runner.os != 'macOS'
