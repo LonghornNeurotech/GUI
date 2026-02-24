@@ -11,8 +11,7 @@ on:
       - '*.html'                                 # Web UI markup
       - '*.js'                                   # Web UI scripts
       - '*.css'                                  # Web UI styles
-      - '*.jpg'                                  # Bundled images (e.g. beach.jpg)
-      - '*.woff2'                                # Bundled fonts
+      - '*.jpg'                                  # Bundled images (e.g. beach.jpg)      - '*.png'                                  # Bundled images (e.g. app icon)      - '*.woff2'                                # Bundled fonts
 
 jobs:
   build:
@@ -50,6 +49,7 @@ jobs:
           --hidden-import=PyQt6.QtOpenGL
           --hidden-import=PyQt6.QtOpenGLWidgets
           --hidden-import=PyQt6.sip
+          --icon "145164501.png"
           --add-data "index.html${{ runner.os == 'Windows' && ';' || ':' }}."
           --add-data "app.js${{ runner.os == 'Windows' && ';' || ':' }}."
           --add-data "styles.css${{ runner.os == 'Windows' && ';' || ':' }}."
@@ -66,6 +66,7 @@ jobs:
           --hidden-import=PyQt6.QtOpenGL
           --hidden-import=PyQt6.QtOpenGLWidgets
           --hidden-import=PyQt6.sip
+          --icon "145164501.png"
           --add-data "index.html:."
           --add-data "app.js:."
           --add-data "styles.css:."
