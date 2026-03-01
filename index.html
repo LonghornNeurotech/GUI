@@ -47,6 +47,13 @@
                     <label>Number of Cycles</label>
                     <input type="number" id="numCycles" value="5" min="1" step="1">
                 </div>
+                <div class="input-row align-top">
+                    <label>Save Location</label>
+                    <div class="input-content-wrapper">
+                        <input type="text" id="saveDir" placeholder="~/Documents/EEG_Recordings">
+                        <button onclick="pickSaveDir()" class="btn-small" style="margin-top:6px; width:100%;">Browse…</button>
+                    </div>
+                </div>
                 <button onclick="showInstructions()" class="btn-primary">Initialize Link</button>
             </div>
         </div>

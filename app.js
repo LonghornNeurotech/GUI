@@ -124,8 +124,23 @@ function createSubstanceBox(title, container, id, isOther = false) {
 // --- Screen navigation -------------------------------------------------------
 function showInstructions() {
     if (!document.getElementById('subName').value) return alert("Subject ID Required");
+    if (!document.getElementById('saveDir').value) return alert("Save Location Required");
     document.getElementById('welcome-screen').style.display = 'none';
     document.getElementById('instruction-screen').style.display = 'block';
+}
+
+/** Called by Python after the user picks a folder via the native dialog. */
+function setSaveDir(path) {
+    document.getElementById('saveDir').value = path;
+}
+
+/** Ask Python to open a native folder picker, result comes back via setSaveDir(). */
+function pickSaveDir() {
+    if (pyBridge) {
+        pyBridge.pick_save_dir();
+    } else {
+        alert("Bridge not ready – type the path manually.");
+    }
 }
 
 function startMindfulness() {
@@ -181,10 +196,11 @@ function startTest() {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 
-    // Auto-start LSL streams via bridge with the patient ID from the form
+    // Auto-start LSL streams via bridge with the patient ID and save location
     const patientId = document.getElementById('subName').value || "UNKNOWN";
+    const saveDir   = document.getElementById('saveDir').value || "";
     if (pyBridge) {
-        pyBridge.start_streams(patientId);
+        pyBridge.start_streams(patientId, saveDir);
     }
 
     // Read cycle count from form (clamp to >= 1)

@@ -17,12 +17,15 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QCheckBox, QSlider, QSpinBox, QPushButton, QLabel, QGroupBox,
     QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QRadioButton, QButtonGroup,
-    QFileDialog, QMessageBox, QComboBox, QLineEdit, QTabWidget, QMenu, QWidgetAction, QScrollArea
+    QFileDialog, QMessageBox, QComboBox, QLineEdit, QTabWidget, QMenu, QWidgetAction, QScrollArea,
+    QInputDialog
 )
 from PyQt6.QtCore import Qt, QTimer, QSize
 from PyQt6.QtGui import QPalette, QColor, QKeySequence, QShortcut
 import platform
 import time
+import struct
+import json
 from datetime import datetime
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebChannel import QWebChannel
@@ -78,6 +81,14 @@ except ImportError as e:
     BoardIds = None
     print(f"Warning: BrainFlow not available. Install with: pip install brainflow")
     print(f"Import error details: {e}")
+
+# XDF file support
+try:
+    import pyxdf
+    PYXDF_AVAILABLE = True
+except ImportError:
+    PYXDF_AVAILABLE = False
+    print("Warning: pyxdf not available. Install with: pip install pyxdf")
 
 # Import your data loading functions
 from conversions import get_gdf_array, get_pkl_array
@@ -194,8 +205,22 @@ class TaskWebBridge(QObject):
         if self.main_window.marker_outlet is not None and LSL_AVAILABLE:
             self.main_window.marker_outlet.push_sample([marker_val])
 
-    @pyqtSlot(str)
-    def start_streams(self, patient_id):
+        # Push directly to XDF recorder (works even without visualization)
+        if self.main_window.xdf_recorder is not None:
+            self.main_window.xdf_recorder.push_marker(time.time(), marker_val)
+
+    @pyqtSlot()
+    def pick_save_dir(self):
+        """Open a native folder picker and send the chosen path back to JS."""
+        mw = self.main_window
+        chosen = QFileDialog.getExistingDirectory(
+            mw, "Choose XDF Save Folder", mw.xdf_save_dir
+        )
+        if chosen:
+            mw.web_view.page().runJavaScript(f"setSaveDir({json.dumps(chosen)})")
+
+    @pyqtSlot(str, str)
+    def start_streams(self, patient_id, save_dir):
         """Called from JS when the recording task begins.
 
         Automatically creates EEG and Marker LSL outlets using the
@@ -206,6 +231,11 @@ class TaskWebBridge(QObject):
         patient_id = patient_id.strip()
         if not patient_id:
             patient_id = "UNKNOWN"
+
+        # Update save directory from the task UI form
+        save_dir = save_dir.strip()
+        if save_dir:
+            mw.xdf_save_dir = os.path.abspath(os.path.expanduser(save_dir))
 
         mw.patient_id = patient_id
         mw.trial_number = mw.trial_spinbox.value()
@@ -254,13 +284,191 @@ class TaskWebBridge(QObject):
             except Exception as e:
                 print(f"Failed to auto-start Marker stream: {e}")
 
+        # If a manual recording is already running, stop it first so the task
+        # gets its own clean file (this also resets the Start Recording button).
+        if mw.xdf_recorder is not None:
+            print("[XDF] Stopping existing recording before starting task recording.")
+            mw.stop_xdf_recording()
+
+        # Start XDF recording now that both outlets are live
+        mw.start_xdf_recording(patient_id)
+
     @pyqtSlot()
     def stop_streams(self):
         """Called from JS when the recording session ends."""
         mw = self.main_window
+        mw.stop_xdf_recording()
         mw.stop_eeg_stream()
         mw.stop_marker_stream()
         print("LSL streams stopped by task UI")
+
+class XDFRecorder:
+    """Records EEG and Marker streams to an XDF 1.0 file.
+
+    Data is pushed directly via push_eeg() / push_marker() — no LSL inlet
+    round-trip required.  Call start() to initialise buffers; call stop() to
+    flush everything to disk.
+    """
+
+    def __init__(self, filepath, eeg_stream_name, marker_stream_name,
+                 num_channels, srate, channel_names=None):
+        self.filepath = filepath
+        self.eeg_stream_name = eeg_stream_name
+        self.marker_stream_name = marker_stream_name
+        self.num_channels = num_channels
+        self.srate = srate
+        self.channel_names = channel_names or [f"Ch{i + 1}" for i in range(num_channels)]
+        self._recording = False
+        self._eeg_samples = []    # [(timestamp: float, values: list[float])]
+        self._marker_samples = [] # [(timestamp: float, text: str)]
+
+    def start(self):
+        self._recording = True
+        self._eeg_samples = []
+        self._marker_samples = []
+        print(f"[XDF] Recording started → {self.filepath}")
+
+    def stop(self):
+        self._recording = False
+        self._write_xdf()
+
+    def push_eeg(self, timestamps, samples):
+        """Append a batch of EEG samples.
+
+        timestamps : list of float (Unix seconds, one per sample)
+        samples    : list of list[float], shape (n_samples, n_channels)
+        """
+        if not self._recording:
+            return
+        for ts, row in zip(timestamps, samples):
+            self._eeg_samples.append((ts, row))
+
+    def push_marker(self, timestamp, text):
+        """Append a single marker event."""
+        if not self._recording:
+            return
+        self._marker_samples.append((timestamp, text))
+
+    # ------------------------------------------------------------------ XDF helpers
+
+    @staticmethod
+    def _encode_varlen(value):
+        """Encode an integer as a variable-length XDF length field."""
+        if value <= 0xFF:
+            return struct.pack('<BB', 1, value)
+        elif value <= 0xFFFFFFFF:
+            return struct.pack('<B', 4) + struct.pack('<I', value)
+        else:
+            return struct.pack('<B', 8) + struct.pack('<Q', value)
+
+    @staticmethod
+    def _write_chunk(f, tag, content):
+        """Write one XDF chunk: [NumLengthBytes][Length][Tag(2)][Content]."""
+        if isinstance(content, str):
+            content = content.encode('utf-8')
+        payload_len = 2 + len(content)
+        f.write(XDFRecorder._encode_varlen(payload_len))
+        f.write(struct.pack('<H', tag))
+        f.write(content)
+
+    def _write_xdf(self):
+        eeg_samples = list(self._eeg_samples)
+        marker_samples = list(self._marker_samples)
+
+        print(f"[XDF] Writing {len(eeg_samples)} EEG samples, "
+              f"{len(marker_samples)} markers → {self.filepath}")
+
+        os.makedirs(os.path.dirname(os.path.abspath(self.filepath)), exist_ok=True)
+
+        with open(self.filepath, 'wb') as f:
+            # Magic bytes
+            f.write(b'XDF:')
+
+            # FileHeader  (tag 1)
+            self._write_chunk(f, 1,
+                '<?xml version="1.0"?><info><version>1.0</version></info>')
+
+            # EEG StreamHeader  (tag 2, stream_id = 1)
+            ch_xml = ''.join(
+                f'<channel><label>{name}</label>'
+                f'<type>EEG</type><unit>microvolts</unit></channel>'
+                for name in self.channel_names[:self.num_channels]
+            )
+            eeg_hdr = (
+                f'<?xml version="1.0"?><info>'
+                f'<name>{self.eeg_stream_name}</name>'
+                f'<type>EEG</type>'
+                f'<channel_count>{self.num_channels}</channel_count>'
+                f'<nominal_srate>{self.srate}</nominal_srate>'
+                f'<channel_format>float32</channel_format>'
+                f'<channels>{ch_xml}</channels>'
+                f'</info>'
+            )
+            self._write_chunk(f, 2, struct.pack('<I', 1) + eeg_hdr.encode('utf-8'))
+
+            # Marker StreamHeader  (tag 2, stream_id = 2)
+            mk_hdr = (
+                '<?xml version="1.0"?><info>'
+                f'<name>{self.marker_stream_name}</name>'
+                '<type>Markers</type>'
+                '<channel_count>1</channel_count>'
+                '<nominal_srate>0</nominal_srate>'
+                '<channel_format>string</channel_format>'
+                '</info>'
+            )
+            self._write_chunk(f, 2, struct.pack('<I', 2) + mk_hdr.encode('utf-8'))
+
+            # EEG Samples chunk  (tag 3, stream_id = 1)
+            if eeg_samples:
+                buf = bytearray()
+                buf += struct.pack('<I', 1)
+                buf += self._encode_varlen(len(eeg_samples))
+                for ts, values in eeg_samples:
+                    buf += struct.pack('<Bd', 8, ts)
+                    vals = (list(values) + [0.0] * self.num_channels)[:self.num_channels]
+                    buf += struct.pack(f'<{self.num_channels}f', *vals)
+                self._write_chunk(f, 3, bytes(buf))
+
+            # Marker Samples chunk  (tag 3, stream_id = 2)
+            # XDF string channels use the same varlen scheme for the per-value
+            # length prefix (indicator byte + 1/4/8 value bytes), NOT plain uint32.
+            if marker_samples:
+                buf = bytearray()
+                buf += struct.pack('<I', 2)
+                buf += self._encode_varlen(len(marker_samples))
+                for ts, text in marker_samples:
+                    encoded = text.encode('utf-8') if isinstance(text, str) else text
+                    buf += struct.pack('<Bd', 8, ts)
+                    buf += self._encode_varlen(len(encoded))
+                    buf += encoded
+                self._write_chunk(f, 3, bytes(buf))
+
+            # EEG StreamFooter  (tag 6, stream_id = 1)
+            first_eeg = eeg_samples[0][0] if eeg_samples else 0.0
+            last_eeg  = eeg_samples[-1][0] if eeg_samples else 0.0
+            eeg_ftr = (
+                f'<?xml version="1.0"?><info>'
+                f'<first_timestamp>{first_eeg}</first_timestamp>'
+                f'<last_timestamp>{last_eeg}</last_timestamp>'
+                f'<sample_count>{len(eeg_samples)}</sample_count>'
+                f'</info>'
+            )
+            self._write_chunk(f, 6, struct.pack('<I', 1) + eeg_ftr.encode('utf-8'))
+
+            # Marker StreamFooter  (tag 6, stream_id = 2)
+            first_mk = marker_samples[0][0] if marker_samples else 0.0
+            last_mk  = marker_samples[-1][0] if marker_samples else 0.0
+            mk_ftr = (
+                f'<?xml version="1.0"?><info>'
+                f'<first_timestamp>{first_mk}</first_timestamp>'
+                f'<last_timestamp>{last_mk}</last_timestamp>'
+                f'<sample_count>{len(marker_samples)}</sample_count>'
+                f'</info>'
+            )
+            self._write_chunk(f, 6, struct.pack('<I', 2) + mk_ftr.encode('utf-8'))
+
+        print(f"[XDF] Saved: {self.filepath}")
+
 
 class SegmentViewer(QMainWindow):
     def __init__(self, window_size_sec=10.0, sampling_rate=125):
@@ -354,6 +562,10 @@ class SegmentViewer(QMainWindow):
         self.stream_start_time = 0
         self.patient_id = ""
         self.trial_number = 1
+        self.xdf_recorder = None
+        self.xdf_save_dir = os.path.expanduser("~/Documents/EEG_Recordings")
+        self.markers = []           # [(time_sec: float, label: str)] for loaded file
+        self._marker_inf_lines = [] # currently displayed InfiniteLine objects
 
         # Signal processing parameters
         self.lowcut = 5.0
@@ -492,6 +704,12 @@ class SegmentViewer(QMainWindow):
         self.start_viz_btn.clicked.connect(self.toggle_streaming_visualization)
         self.start_viz_btn.setEnabled(False)
         stream_layout.addWidget(self.start_viz_btn)
+
+        # Manual XDF recording button
+        self.start_recording_btn = QPushButton("Start Recording")
+        self.start_recording_btn.clicked.connect(self.toggle_manual_recording)
+        self.start_recording_btn.setEnabled(False)
+        stream_layout.addWidget(self.start_recording_btn)
 
         # Motor imagery task button (placeholder)
         self.motor_imagery_btn = QPushButton("Motor Imagery Task")
@@ -814,24 +1032,32 @@ class SegmentViewer(QMainWindow):
 
     def load_file(self):
         """Open file dialog to load .gdf or .pkl file"""
+        xdf_filter = ";;XDF Files (*.xdf)" if PYXDF_AVAILABLE else ""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open EEG File",
             "",
-            "EEG Files (*.gdf *.pkl);;GDF Files (*.gdf);;Pickle Files (*.pkl);;All Files (*)"
+            f"EEG Files (*.gdf *.pkl{' *.xdf' if PYXDF_AVAILABLE else ''});;GDF Files (*.gdf);;Pickle Files (*.pkl){xdf_filter};;All Files (*)"
         )
-        
+
         if not file_path:
             return  # User cancelled
-        
+
         try:
             # Load data based on file extension
+            self.markers = []  # reset markers from any previous file
             if file_path.endswith('.gdf'):
                 self.raw_data, file_metadata = get_gdf_array(file_path)
             elif file_path.endswith('.pkl'):
                 self.raw_data, file_metadata = get_pkl_array(file_path)
+            elif file_path.endswith('.xdf'):
+                if not PYXDF_AVAILABLE:
+                    QMessageBox.warning(self, "Error", "pyxdf is not installed. Run: pip install pyxdf")
+                    return
+                self.raw_data, srate, ch_names, self.markers = self._load_xdf(file_path)
+                file_metadata = {'sfreq': srate, 'ch_names': ch_names}
             else:
-                QMessageBox.warning(self, "Error", "Unsupported file type. Please select a .gdf or .pkl file.")
+                QMessageBox.warning(self, "Error", "Unsupported file type. Please select a .gdf, .pkl, or .xdf file.")
                 return
 
             # Apply metadata from file (sampling rate, channel names)
@@ -930,6 +1156,71 @@ class SegmentViewer(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to load file:\n{str(e)}")
     
     
+    def _load_xdf(self, path):
+        """Load an XDF file and return (raw_data, srate, ch_names, markers).
+
+        raw_data : np.ndarray  shape [n_channels, n_samples]
+        srate    : int         nominal sampling rate in Hz
+        ch_names : list[str]   channel labels
+        markers  : list of (time_sec: float, label: str)  relative to first EEG sample
+        """
+        streams, _ = pyxdf.load_xdf(path)
+
+        # Pick the EEG stream: prefer type='EEG', else the numeric stream with most channels
+        eeg_stream = None
+        for s in streams:
+            stype = s['info']['type'][0].upper()
+            fmt   = s['info'].get('channel_format', ['string'])[0]
+            if fmt == 'string':
+                continue
+            ts = s['time_stamps']
+            if ts is None or len(ts) == 0:
+                continue
+            if stype == 'EEG':
+                eeg_stream = s
+                break
+            n_ch = int(s['info']['channel_count'][0])
+            if eeg_stream is None or n_ch > int(eeg_stream['info']['channel_count'][0]):
+                eeg_stream = s
+
+        if eeg_stream is None:
+            raise ValueError("No EEG stream with samples found in the XDF file.")
+
+        data = np.array(eeg_stream['time_series'], dtype=float).T  # [n_ch, n_samples]
+
+        srate = float(eeg_stream['info']['nominal_srate'][0])
+        if srate <= 0:
+            ts_arr = eeg_stream['time_stamps']
+            srate = (len(ts_arr) - 1) / (ts_arr[-1] - ts_arr[0]) if len(ts_arr) > 1 else 250.0
+        srate = int(round(srate))
+
+        try:
+            ch_names = [
+                ch['label'][0]
+                for ch in eeg_stream['info']['desc'][0]['channels'][0]['channel']
+            ]
+        except Exception:
+            ch_names = [f"Ch{i + 1}" for i in range(data.shape[0])]
+
+        t0 = eeg_stream['time_stamps'][0]
+
+        # Collect markers from every string/marker stream
+        markers = []
+        for s in streams:
+            stype = s['info']['type'][0].upper()
+            fmt   = s['info'].get('channel_format', ['float32'])[0]
+            ts    = s['time_stamps']
+            if ts is None or len(ts) == 0:
+                continue
+            if stype in ('MARKERS', 'MARKER') or fmt == 'string':
+                for stamp, row in zip(ts, s['time_series']):
+                    label = str(row[0]) if row else ''
+                    if label:
+                        markers.append((stamp - t0, label))
+        markers.sort(key=lambda x: x[0])
+
+        return data, srate, ch_names, markers
+
     def setup_overlay_mode(self):
         """Setup single plot widget for overlay display"""
         # Clear existing plots
@@ -1613,6 +1904,64 @@ class SegmentViewer(QMainWindow):
         
         return start_idx, end_idx
     
+    def _format_marker_label(self, label):
+        """Convert a raw marker string to a short, human-readable label.
+
+        Markers sent by the task UI are JSON dicts like:
+            {"stop": "BLINK", "start": "LEFT"}
+        This parses that and returns a compact string like "LEFT" or "■BLINK".
+        Plain strings are returned unchanged.
+        """
+        try:
+            data = json.loads(label)
+            stop  = data.get('stop',  '') or ''
+            start = data.get('start', '') or ''
+            if stop and start:
+                return f"{stop} \u2192 {start}"   # e.g. "REST → BLINK"
+            if start:
+                return f"\u2192 {start}"
+            if stop:
+                return f"{stop} \u2192"
+            return label
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return label
+
+    def _draw_markers(self, plot_ref, t_start, t_end):
+        """Draw dashed vertical marker lines on plot_ref for the visible time window.
+
+        Removes any previously drawn marker lines first, then adds one
+        InfiniteLine per marker that falls within [t_start, t_end].
+        """
+        for line in self._marker_inf_lines:
+            try:
+                plot_ref.removeItem(line)
+            except Exception:
+                pass
+        self._marker_inf_lines.clear()
+
+        if not self.markers:
+            return
+
+        marker_pen = pg.mkPen(color=(210, 70, 70), width=1, style=Qt.PenStyle.DashLine)
+        label_color = (210, 70, 70)
+
+        for ts, label in self.markers:
+            if t_start <= ts <= t_end:
+                # Parse JSON marker strings (e.g. {"start":"LEFT","stop":"BLINK"})
+                # into a short readable label, then escape { } so pyqtgraph's
+                # str.format() doesn't treat them as template placeholders.
+                display = self._format_marker_label(label)
+                safe = display.replace('{', '{{').replace('}', '}}')
+                line = pg.InfiniteLine(
+                    pos=ts,
+                    angle=90,
+                    pen=marker_pen,
+                    label=safe,
+                    labelOpts={'position': 0.97, 'color': label_color},
+                )
+                plot_ref.addItem(line)
+                self._marker_inf_lines.append(line)
+
     def update_plot_overlay(self, set_y_range=True):
         """Update plot in overlay mode - plots only visible data
         
@@ -1656,9 +2005,12 @@ class SegmentViewer(QMainWindow):
         
         # Set X-axis range to show current window
         self.plot_widget.setXRange(t_start, t_end)
-        
+
         self.plot_widget.addLegend()
-    
+
+        # Draw marker lines for this window
+        self._draw_markers(self.plot_widget, t_start, t_end)
+
     def on_overlay_range_changed(self):
         """Called when user zooms or pans in overlay mode - updates visible data"""
         if self.mode == 'stream' or self._skip_range_update:
@@ -1674,13 +2026,20 @@ class SegmentViewer(QMainWindow):
         view_range = self.plot_widget.viewRange()[0]  # [x_min, x_max]
         start_idx, end_idx = self.get_visible_data_range(view_range)
 
+        # Guard against empty slice (view scrolled past data boundary)
+        if start_idx >= end_idx:
+            return
+
         # Update data for each active channel
         for ch_idx in sorted(self.active_channels):
             if ch_idx in self.overlay_plot_items:
                 data = self.raw_data[ch_idx, start_idx:end_idx]
                 time_slice = self.full_time_axis[start_idx:end_idx]
                 self.overlay_plot_items[ch_idx].setData(time_slice, data)
-    
+
+        # Update marker lines to match the new visible range
+        self._draw_markers(self.plot_widget, view_range[0], view_range[1])
+
     def update_plot_stacked(self, rebuild_layout=True):
         """Update plots in stacked mode - mne-lsl style with vertical offsets.
 
@@ -1783,7 +2142,10 @@ class SegmentViewer(QMainWindow):
 
         # Set X range to current window
         self.stacked_plot_item.setXRange(t_start, t_end, 0)
-    
+
+        # Draw marker lines for this window
+        self._draw_markers(self.stacked_plot_item, t_start, t_end)
+
     def on_stacked_range_changed(self):
         """Called when user pans in stacked mode - updates visible data"""
         if self.mode == 'stream' or self._skip_range_update:
@@ -1808,6 +2170,10 @@ class SegmentViewer(QMainWindow):
         d = self.compute_channel_spacing(num_active)
         offsets = np.arange(0, -num_active * d, -d)
 
+        # Guard against empty slice (view scrolled past data boundary)
+        if start_idx >= end_idx:
+            return
+
         # Vectorized: extract all channels and compute means in one numpy call
         active_indices = np.array(active_list)
         all_data = self.raw_data[active_indices, start_idx:end_idx]
@@ -1818,6 +2184,9 @@ class SegmentViewer(QMainWindow):
             if ch_idx in self.stacked_plot_items:
                 offset_data = (all_data[k] - all_means[k]) * self.channel_amplitude_scale + offsets[k]
                 self.stacked_plot_items[ch_idx].setData(time_slice, offset_data)
+
+        # Update marker lines to match the new visible range
+        self._draw_markers(self.stacked_plot_item, view_range[0], view_range[1])
 
     def navigate_to_window(self, value):
         """Navigate to a specific window and update the view
@@ -2166,10 +2535,15 @@ class SegmentViewer(QMainWindow):
             self.start_eeg_stream_btn.setEnabled(True)
             self.start_marker_stream_btn.setEnabled(True)
             self.start_viz_btn.setEnabled(True)
+            self.start_recording_btn.setEnabled(True)
             self.motor_imagery_btn.setEnabled(True)
 
             # Setup channel checkboxes for streaming
             self.setup_streaming_channels()
+
+            # Start data pump — drains board and pushes to LSL/XDF at 60 Hz
+            # regardless of whether visualization is active
+            self.stream_timer.start(16)
 
             QMessageBox.information(self, "Success", f"Connected to headset!\n{self.num_channels} channels @ {self.sampling_rate} Hz")
 
@@ -2183,6 +2557,9 @@ class SegmentViewer(QMainWindow):
         try:
             if self.streaming_active:
                 self.toggle_streaming_visualization()
+
+            # Stop the data pump before releasing the board
+            self.stream_timer.stop()
 
             if self.board is not None:
                 self.board.stop_stream()
@@ -2206,6 +2583,9 @@ class SegmentViewer(QMainWindow):
             self.start_eeg_stream_btn.setEnabled(False)
             self.start_marker_stream_btn.setEnabled(False)
             self.start_viz_btn.setEnabled(False)
+            self.start_recording_btn.setEnabled(False)
+            self.start_recording_btn.setText("Start Recording")
+            self.start_recording_btn.setStyleSheet("")
             self.motor_imagery_btn.setEnabled(False)
 
             self.eeg_stream_status.setText("EEG Stream: Inactive")
@@ -2238,7 +2618,12 @@ class SegmentViewer(QMainWindow):
         # Enable channel group
         self.channel_group.setEnabled(True)
 
-        # Select all channels by default
+        # Select all channels by default.
+        # Force a False→True transition so stateChanged always fires even if
+        # the checkbox was already True from a previous connection.
+        self.select_all_checkbox.blockSignals(True)
+        self.select_all_checkbox.setChecked(False)
+        self.select_all_checkbox.blockSignals(False)
         self.select_all_checkbox.setChecked(True)
 
     def start_eeg_stream(self):
@@ -2357,6 +2742,94 @@ class SegmentViewer(QMainWindow):
         self.start_marker_stream_btn.clicked.disconnect()
         self.start_marker_stream_btn.clicked.connect(self.start_marker_stream)
 
+    # ------------------------------------------------------------------ XDF recording
+
+    def _next_xdf_counter(self, patient_id):
+        """Return the next auto-incrementing counter for patient_id (persisted to disk)."""
+        counter_file = os.path.join(self.xdf_save_dir, '.xdf_counter.json')
+        counters = {}
+        if os.path.exists(counter_file):
+            try:
+                with open(counter_file, 'r') as f:
+                    counters = json.load(f)
+            except Exception:
+                pass
+        n = counters.get(patient_id, 0) + 1
+        counters[patient_id] = n
+        try:
+            os.makedirs(self.xdf_save_dir, exist_ok=True)
+            with open(counter_file, 'w') as f:
+                json.dump(counters, f)
+        except Exception as e:
+            print(f"[XDF] Warning: could not persist counter: {e}")
+        return n
+
+    def start_xdf_recording(self, patient_id):
+        """Begin XDF recording of EEG + Marker LSL streams."""
+        if self.xdf_recorder is not None:
+            print("[XDF] Recording already in progress; ignoring duplicate start.")
+            return
+
+        os.makedirs(self.xdf_save_dir, exist_ok=True)
+        counter = self._next_xdf_counter(patient_id)
+        filepath = os.path.join(self.xdf_save_dir, f"{patient_id}_{counter:04d}.xdf")
+
+        eeg_name = f"EEG_{patient_id}_Trial{self.trial_number:04d}"
+        mk_name  = f"Markers_{patient_id}_Trial{self.trial_number:04d}"
+        ch_names = (self.channel_names if self.channel_names
+                    else [self.get_channel_name(i) for i in range(self.num_channels)])
+
+        self.xdf_recorder = XDFRecorder(
+            filepath=filepath,
+            eeg_stream_name=eeg_name,
+            marker_stream_name=mk_name,
+            num_channels=self.num_channels,
+            srate=self.sampling_rate,
+            channel_names=ch_names,
+        )
+        self.xdf_recorder.start()
+
+    def stop_xdf_recording(self):
+        """Finalise and save the XDF file."""
+        if self.xdf_recorder is not None:
+            self.xdf_recorder.stop()
+            self.xdf_recorder = None
+        # Reset the manual recording button regardless of who triggered the stop
+        if hasattr(self, 'start_recording_btn'):
+            self.start_recording_btn.setText("Start Recording")
+            self.start_recording_btn.setStyleSheet("")
+
+    def toggle_manual_recording(self):
+        """Start or stop a manual XDF recording from the main UI button."""
+        if self.xdf_recorder is not None:
+            # Currently recording — stop
+            self.stop_xdf_recording()
+            return
+
+        # --- Choose save location ---
+        chosen_dir = QFileDialog.getExistingDirectory(
+            self, "Choose XDF Save Folder", self.xdf_save_dir
+        )
+        if not chosen_dir:
+            return  # user cancelled
+        self.xdf_save_dir = chosen_dir
+
+        # --- Ask for patient ID (prefill with current value if available) ---
+        default_id = self.patient_id if self.patient_id else "SUB_001"
+        patient_id, ok = QInputDialog.getText(
+            self, "Patient ID", "Enter subject / patient ID:", text=default_id
+        )
+        if not ok or not patient_id.strip():
+            return  # user cancelled or left blank
+        patient_id = patient_id.strip()
+
+        # --- Start recording ---
+        self.start_xdf_recording(patient_id)
+
+        # Update button to show active state
+        self.start_recording_btn.setText("Stop Recording")
+        self.start_recording_btn.setStyleSheet("background-color: #f44336; color: white;")
+
     def toggle_streaming_visualization(self):
         """Start or stop real-time visualization"""
         if not self.streaming_active:
@@ -2364,7 +2837,7 @@ class SegmentViewer(QMainWindow):
             self.streaming_active = True
             self.stream_first_update = True  # Flag for initial auto-range
             self.stream_start_time = local_clock() if LSL_AVAILABLE else 0
-            self.stream_timer.start(16)  # Update every ~16ms (~60 Hz) for smooth visualization
+            # stream_timer already running from connect; no restart needed
             self.start_viz_btn.setText("Stop Visualization")
             self.start_viz_btn.setStyleSheet("background-color: #f44336; color: white;")
             self.play_pause_btn.setText("Stop Streaming")
@@ -2428,7 +2901,7 @@ class SegmentViewer(QMainWindow):
             # Stop streaming visualization
             # Keep graphs visible - they will be cleared when new visualization starts
             self.streaming_active = False
-            self.stream_timer.stop()
+            # stream_timer keeps running to continue draining board for LSL/XDF
             self.start_viz_btn.setText("Start Visualization")
             self.start_viz_btn.setStyleSheet("")
             self.play_pause_btn.setText("Start Streaming")
@@ -2472,8 +2945,8 @@ class SegmentViewer(QMainWindow):
             self.plot_widget.clear()
 
     def update_stream_data(self):
-        """Update visualization with new streaming data - rolling buffer (newest on right)"""
-        if self.board is None or not self.streaming_active:
+        """Drain BrainFlow board, push to LSL/XDF, and (when active) update visualization."""
+        if self.board is None:
             return
 
         try:
@@ -2486,10 +2959,22 @@ class SegmentViewer(QMainWindow):
             # Extract EEG channels
             eeg_data = data[self.eeg_channels, :]
 
+            # --- Always push raw data to LSL and XDF regardless of visualization state ---
+
             # Send to LSL if outlet is active - use push_chunk for efficiency
             if self.eeg_outlet is not None and LSL_AVAILABLE:
                 chunk = eeg_data.T.tolist()
                 self.eeg_outlet.push_chunk(chunk)
+
+            # Push raw (unfiltered) EEG to XDF recorder if active
+            if self.xdf_recorder is not None and BRAINFLOW_AVAILABLE:
+                ts_ch = BoardShim.get_timestamp_channel(self.board_id)  # type: ignore[union-attr]
+                timestamps = data[ts_ch, :].tolist()
+                self.xdf_recorder.push_eeg(timestamps, eeg_data.T.tolist())
+
+            # --- Everything below is visualization-only ---
+            if not self.streaming_active:
+                return
 
             # Apply signal processing (bandpass, notch with stateful filters)
             processed_data = self.process_signal(eeg_data)
