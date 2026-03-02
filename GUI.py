@@ -18,10 +18,10 @@ from PyQt6.QtWidgets import (
     QCheckBox, QSlider, QSpinBox, QPushButton, QLabel, QGroupBox,
     QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QRadioButton, QButtonGroup,
     QFileDialog, QMessageBox, QComboBox, QLineEdit, QTabWidget, QMenu, QWidgetAction, QScrollArea,
-    QInputDialog
+    QInputDialog, QToolButton, QSizePolicy, QProgressBar, QGridLayout
 )
 from PyQt6.QtCore import Qt, QTimer, QSize
-from PyQt6.QtGui import QPalette, QColor, QKeySequence, QShortcut
+from PyQt6.QtGui import QPalette, QColor, QKeySequence, QShortcut, QAction
 import platform
 import time
 import struct
@@ -58,13 +58,16 @@ except ImportError:
 
 # LSL imports
 try:
-    from pylsl import StreamInfo, StreamOutlet, local_clock, cf_float32, cf_string
+    from pylsl import (StreamInfo, StreamOutlet, StreamInlet, resolve_byprop,
+                       local_clock, cf_float32, cf_string)
     LSL_AVAILABLE = True
 except ImportError:
     LSL_AVAILABLE = False
     # Define dummy values if import fails
     StreamInfo = None
     StreamOutlet = None
+    StreamInlet = None
+    resolve_byprop = None
     local_clock = None
     cf_float32 = None
     cf_string = None
@@ -217,6 +220,8 @@ class TaskWebBridge(QObject):
             mw, "Choose XDF Save Folder", mw.xdf_save_dir
         )
         if chosen:
+            mw.xdf_save_dir = chosen
+            mw._xdf_save_dir_confirmed = True
             mw.web_view.page().runJavaScript(f"setSaveDir({json.dumps(chosen)})")
 
     @pyqtSlot(str, str)
@@ -300,6 +305,8 @@ class TaskWebBridge(QObject):
         mw.stop_xdf_recording()
         mw.stop_eeg_stream()
         mw.stop_marker_stream()
+        # Auto-advance trial number so the next run gets a fresh file
+        mw.trial_spinbox.setValue(mw.trial_spinbox.value() + 1)
         print("LSL streams stopped by task UI")
 
 class XDFRecorder:
@@ -552,6 +559,8 @@ class SegmentViewer(QMainWindow):
         self.stream_first_update = True  # Flag for initial auto-range on first streaming update
         self.board = None
         self.board_id = None
+        self.lsl_inlet = None      # For LSL-based headsets (Neurable, etc.)
+        self.headset_source = None  # 'brainflow' or 'lsl_inlet'
         self.eeg_channels = None
         self.eeg_outlet = None
         self.marker_outlet = None
@@ -564,6 +573,7 @@ class SegmentViewer(QMainWindow):
         self.trial_number = 1
         self.xdf_recorder = None
         self.xdf_save_dir = os.path.expanduser("~/Documents/EEG_Recordings")
+        self._xdf_save_dir_confirmed = False  # True after user has picked a dir at least once
         self.markers = []           # [(time_sec: float, label: str)] for loaded file
         self._marker_inf_lines = [] # currently displayed InfiniteLine objects
 
@@ -573,8 +583,9 @@ class SegmentViewer(QMainWindow):
         self.notch_freq = 60.0
         self.magnitude_scale = 100  # microvolts
         # OpenBCI-style smooth: moving average window in seconds applied to display
-        self.smooth_seconds = 0.12  # Default 120ms window
+        self.smooth_seconds = 0.12  # Default 120ms window (or EMA alpha when in EMA mode)
         self.smoothing_enabled = True
+        self.smooth_type = 'Box Filter'  # 'Box Filter' or 'EMA'
 
         # Pre-calculated filter coefficients (will be computed when sampling rate is known)
         self.filter_coeffs_valid = False
@@ -711,12 +722,23 @@ class SegmentViewer(QMainWindow):
         self.start_recording_btn.setEnabled(False)
         stream_layout.addWidget(self.start_recording_btn)
 
-        # Motor imagery task button (placeholder)
-        self.motor_imagery_btn = QPushButton("Motor Imagery Task")
-        self.motor_imagery_btn.clicked.connect(self.motor_imagery_task)
-        self.motor_imagery_btn.setEnabled(False)
-        self.motor_imagery_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
-        stream_layout.addWidget(self.motor_imagery_btn)
+        # Task launcher dropdown button
+        self._task_menu = QMenu(self)
+        mi_action = QAction("Motor Imagery Task", self)
+        mi_action.triggered.connect(self.motor_imagery_task)
+        prosthetic_action = QAction("Prosthetic Control", self)
+        prosthetic_action.triggered.connect(self.launch_prosthetic)
+        self._task_menu.addAction(mi_action)
+        self._task_menu.addAction(prosthetic_action)
+
+        self.task_launcher_btn = QToolButton()
+        self.task_launcher_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.task_launcher_btn.setMenu(self._task_menu)
+        self.task_launcher_btn.setDefaultAction(mi_action)
+        self.task_launcher_btn.setEnabled(False)
+        self.task_launcher_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self.task_launcher_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        stream_layout.addWidget(self.task_launcher_btn)
 
         self.stream_group.setLayout(stream_layout)
         self.stream_group.setEnabled(False)
@@ -742,14 +764,19 @@ class SegmentViewer(QMainWindow):
         self.smooth_checkbox.setChecked(True)
         self.smooth_checkbox.stateChanged.connect(self.on_smooth_checkbox_changed)
         smooth_layout.addWidget(self.smooth_checkbox)
+        self.smooth_type_combo = QComboBox()
+        self.smooth_type_combo.addItems(['Box Filter', 'EMA'])
+        self.smooth_type_combo.setMaximumWidth(90)
+        self.smooth_type_combo.currentTextChanged.connect(self.on_smooth_type_changed)
+        smooth_layout.addWidget(self.smooth_type_combo)
         self.smooth_slider = QSlider(Qt.Orientation.Horizontal)
-        self.smooth_slider.setMinimum(1)    # 10 ms
-        self.smooth_slider.setMaximum(20)   # 200 ms
+        self.smooth_slider.setMinimum(1)    # 10 ms (Box) / α 0.05 (EMA)
+        self.smooth_slider.setMaximum(50)   # 500 ms (Box) / α 0.95 (EMA)
         self.smooth_slider.setValue(12)     # Default 120 ms
         self.smooth_slider.valueChanged.connect(self.on_smooth_slider_changed)
         smooth_layout.addWidget(self.smooth_slider)
         self.smooth_label = QLabel("120 ms")
-        self.smooth_label.setMinimumWidth(50)
+        self.smooth_label.setMinimumWidth(52)
         smooth_layout.addWidget(self.smooth_label)
         signal_layout.addLayout(smooth_layout)
 
@@ -2463,108 +2490,278 @@ class SegmentViewer(QMainWindow):
                         pw.setMouseEnabled(x=False, y=False)
 
     def auto_connect_headset(self):
-        """Auto-detect and connect to EEG headset"""
-        if not BRAINFLOW_AVAILABLE:
-            QMessageBox.critical(self, "Error", "BrainFlow is not installed.\nInstall with: pip install brainflow")
-            return
+        """Auto-detect and connect to any EEG headset.
 
-        if not SERIAL_AVAILABLE:
-            QMessageBox.critical(self, "Error", "pyserial is not installed.\nInstall with: pip install pyserial")
-            return
-
+        Priority:
+        1. Serial device found → try Cyton+Daisy (16ch/125Hz), then Cyton (8ch/250Hz)
+        2. No serial device   → offer LSL stream scan (Neurable, etc.) or synthetic board
+        """
         self.connect_btn.setEnabled(False)
         self.connect_btn.setText("Connecting...")
 
-        try:
-            # Find serial port
+        # ── BrainFlow serial path ──────────────────────────────────────────────
+        if BRAINFLOW_AVAILABLE and SERIAL_AVAILABLE:
             serial_port = find_headset_port()
-
-            if serial_port is None:
-                response = QMessageBox.question(
-                    self,
-                    "No Headset Found",
-                    "No headset detected. Use synthetic board for testing?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            if serial_port is not None:
+                # Try Cyton+Daisy (16ch @ 125 Hz) first, fall back to Cyton (8ch @ 250 Hz)
+                for board_id in [BoardIds.CYTON_DAISY_BOARD.value,
+                                  BoardIds.CYTON_BOARD.value]:
+                    board = None
+                    try:
+                        params = BrainFlowInputParams()
+                        params.serial_port = serial_port
+                        BoardShim.enable_dev_board_logger()
+                        board = BoardShim(board_id, params)
+                        board.prepare_session()
+                        board.start_stream()
+                        self.board = board
+                        self.board_id = board_id
+                        self._finish_brainflow_connection()
+                        return
+                    except Exception as e:
+                        print(f"Board id {board_id} failed: {e}")
+                        if board is not None:
+                            try:
+                                board.release_session()
+                            except Exception:
+                                pass
+                QMessageBox.critical(
+                    self, "Connection Error",
+                    "Found a serial device but could not initialise it as "
+                    "Cyton+Daisy or plain Cyton.\n"
+                    "Check that the headset is powered on and the COM port is free."
                 )
-                if response == QMessageBox.StandardButton.Yes:
-                    self.board_id = BoardIds.SYNTHETIC_BOARD.value
-                    params = BrainFlowInputParams()
-                else:
-                    self.connect_btn.setEnabled(True)
-                    self.connect_btn.setText("Auto-Connect Headset")
-                    return
-            else:
-                self.board_id = BoardIds.CYTON_BOARD.value
+                self._reset_connect_btn()
+                return
+
+        # ── No serial device — offer LSL scan or synthetic ─────────────────────
+        msg = QMessageBox(self)
+        msg.setWindowTitle("No Serial Device Found")
+        msg.setText(
+            "No serial EEG device was detected.\n\n"
+            "• Scan LSL Streams — connect to any LSL EEG source\n"
+            "  (Neurable, OpenBCI GUI, BrainVision, etc.)\n\n"
+            "• Synthetic Board — simulated data for testing"
+        )
+        lsl_btn   = msg.addButton("Scan LSL Streams",  QMessageBox.ButtonRole.AcceptRole)
+        synth_btn = msg.addButton("Synthetic Board",   QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+
+        if clicked is lsl_btn:
+            self._reset_connect_btn()
+            self.scan_and_connect_lsl()
+            return
+
+        if clicked is synth_btn:
+            if not BRAINFLOW_AVAILABLE:
+                QMessageBox.critical(
+                    self, "Error",
+                    "BrainFlow is not installed — cannot use synthetic board.\n"
+                    "Install with: pip install brainflow"
+                )
+                self._reset_connect_btn()
+                return
+            try:
                 params = BrainFlowInputParams()
-                params.serial_port = serial_port
+                BoardShim.enable_dev_board_logger()
+                self.board = BoardShim(BoardIds.SYNTHETIC_BOARD.value, params)
+                self.board.prepare_session()
+                self.board.start_stream()
+                self.board_id = BoardIds.SYNTHETIC_BOARD.value
+                self._finish_brainflow_connection()
+            except Exception as e:
+                QMessageBox.critical(self, "Connection Error",
+                                     f"Failed to start synthetic board:\n{e}")
+                self._reset_connect_btn()
+            return
 
-            # Initialize board
-            BoardShim.enable_dev_board_logger()
-            self.board = BoardShim(self.board_id, params)
-            self.board.prepare_session()
-            self.board.start_stream()
+        # Cancel
+        self._reset_connect_btn()
 
-            # Get channel info
-            self.eeg_channels = BoardShim.get_eeg_channels(self.board_id)
-            self.num_channels = len(self.eeg_channels)
-            self.sampling_rate = BoardShim.get_sampling_rate(self.board_id)
+    # ── connection helpers ─────────────────────────────────────────────────────
 
-            # Initialize buffer for streaming using current window length
-            buffer_size = int(self.sampling_rate * self.window_size_sec)
-            self.stream_buffer = np.zeros((self.num_channels, buffer_size))
-            self.stream_time_axis = np.arange(buffer_size) / self.sampling_rate
+    def _reset_connect_btn(self):
+        """Restore the connect button to its idle state."""
+        self.connect_btn.setEnabled(True)
+        self.connect_btn.setText("Auto-Connect Headset")
 
-            # Pre-calculate filter coefficients now that sampling rate is known
-            self.calculate_filter_coefficients()
+    def _finish_brainflow_connection(self):
+        """Read metadata from BrainFlow and call _complete_connection."""
+        self.headset_source = 'brainflow'
+        self.eeg_channels  = BoardShim.get_eeg_channels(self.board_id)
+        self.num_channels  = len(self.eeg_channels)
+        self.sampling_rate = BoardShim.get_sampling_rate(self.board_id)
+        try:
+            self.channel_names = list(BoardShim.get_eeg_names(self.board_id))
+        except Exception:
+            self.channel_names = []
+        self._complete_connection()
 
-            # Update UI - sync sampling rate spinbox to detected hardware rate
-            self.sampling_rate_spinbox.blockSignals(True)
-            self.sampling_rate_spinbox.setValue(self.sampling_rate)
-            self.sampling_rate_spinbox.blockSignals(False)
-            # Lock sampling rate during streaming (hardware determines it)
-            self.sampling_rate_spinbox.setEnabled(False)
+    def scan_and_connect_lsl(self):
+        """Discover LSL EEG streams on the network and let the user pick one."""
+        if not LSL_AVAILABLE:
+            QMessageBox.critical(
+                self, "Error",
+                "pylsl is not installed — cannot scan for LSL streams.\n"
+                "Install with: pip install pylsl"
+            )
+            return
 
-            self.connection_status.setText(f"Connected: {self.num_channels} channels @ {self.sampling_rate} Hz")
-            self.connection_status.setStyleSheet("color: green;")
-            self.connect_btn.setText("Disconnect")
-            self.connect_btn.clicked.disconnect()
-            self.connect_btn.clicked.connect(self.disconnect_headset)
-            self.connect_btn.setEnabled(True)
+        self.connect_btn.setEnabled(False)
+        self.connect_btn.setText("Scanning LSL…")
 
-            # Enable stream controls
-            self.start_eeg_stream_btn.setEnabled(True)
-            self.start_marker_stream_btn.setEnabled(True)
-            self.start_viz_btn.setEnabled(True)
-            self.start_recording_btn.setEnabled(True)
-            self.motor_imagery_btn.setEnabled(True)
-
-            # Setup channel checkboxes for streaming
-            self.setup_streaming_channels()
-
-            # Start data pump — drains board and pushes to LSL/XDF at 60 Hz
-            # regardless of whether visualization is active
-            self.stream_timer.start(16)
-
-            QMessageBox.information(self, "Success", f"Connected to headset!\n{self.num_channels} channels @ {self.sampling_rate} Hz")
-
+        try:
+            streams = resolve_byprop('type', 'EEG', timeout=4.0)
         except Exception as e:
-            QMessageBox.critical(self, "Connection Error", f"Failed to connect to headset:\n{str(e)}")
-            self.connect_btn.setEnabled(True)
-            self.connect_btn.setText("Auto-Connect Headset")
+            QMessageBox.critical(self, "LSL Scan Error",
+                                 f"Failed to scan for LSL streams:\n{e}")
+            self._reset_connect_btn()
+            return
+
+        if not streams:
+            QMessageBox.warning(
+                self, "No LSL Streams Found",
+                "No EEG LSL streams were found on the network.\n"
+                "Make sure the headset software is running and broadcasting LSL."
+            )
+            self._reset_connect_btn()
+            return
+
+        # Stream picker dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Select LSL EEG Stream")
+        dlg.setMinimumWidth(460)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("Available EEG streams:"))
+        combo = QComboBox()
+        for s in streams:
+            sr = s.nominal_srate()
+            sr_str = f"{sr:.1f}" if sr > 0 else "irregular"
+            combo.addItem(
+                f"{s.name()}  [{s.channel_count()} ch @ {sr_str} Hz]"
+                f"  — {s.hostname()}"
+            )
+        layout.addWidget(combo)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self._reset_connect_btn()
+            return
+
+        chosen = streams[combo.currentIndex()]
+        try:
+            inlet = StreamInlet(chosen, max_buflen=30)
+            info  = inlet.info(timeout=5.0)
+
+            self.lsl_inlet      = inlet
+            self.headset_source = 'lsl_inlet'
+            self.board          = None
+            self.board_id       = None
+            self.eeg_channels   = None
+            self.num_channels   = info.channel_count()
+            sr = info.nominal_srate()
+            self.sampling_rate  = int(sr) if sr > 0 else 250
+
+            # Parse per-channel labels from stream XML descriptor
+            ch_names = []
+            ch_node = info.desc().child("channels").child("channel")
+            for _ in range(self.num_channels):
+                label = ch_node.child_value("label")
+                ch_names.append(label if label else "")
+                ch_node = ch_node.next_sibling()
+            self.channel_names = [
+                name if name else f"Ch{i + 1}"
+                for i, name in enumerate(ch_names)
+            ]
+            self._complete_connection()
+        except Exception as e:
+            QMessageBox.critical(self, "LSL Connect Error",
+                                 f"Failed to open LSL inlet:\n{e}")
+            self._reset_connect_btn()
+
+    def _complete_connection(self):
+        """Shared UI and state setup after any successful headset connection."""
+        buffer_size = int(self.sampling_rate * self.window_size_sec)
+        self.stream_buffer    = np.zeros((self.num_channels, buffer_size))
+        self.stream_time_axis = np.arange(buffer_size) / self.sampling_rate
+
+        self.calculate_filter_coefficients()
+
+        self.sampling_rate_spinbox.blockSignals(True)
+        self.sampling_rate_spinbox.setValue(self.sampling_rate)
+        self.sampling_rate_spinbox.blockSignals(False)
+        self.sampling_rate_spinbox.setEnabled(False)
+
+        if self.headset_source == 'lsl_inlet':
+            status = (f"Connected via LSL: {self.num_channels} ch "
+                      f"@ {self.sampling_rate} Hz")
+        else:
+            board_label = ""
+            if BRAINFLOW_AVAILABLE and self.board_id is not None:
+                board_label = {
+                    BoardIds.CYTON_BOARD.value:       "Cyton 8ch",
+                    BoardIds.CYTON_DAISY_BOARD.value: "Cyton+Daisy 16ch",
+                    BoardIds.SYNTHETIC_BOARD.value:   "Synthetic",
+                }.get(self.board_id, f"Board {self.board_id}")
+            status = (f"Connected ({board_label}): "
+                      f"{self.num_channels} ch @ {self.sampling_rate} Hz")
+
+        self.connection_status.setText(status)
+        self.connection_status.setStyleSheet("color: green;")
+        self.connect_btn.setText("Disconnect")
+        self.connect_btn.clicked.disconnect()
+        self.connect_btn.clicked.connect(self.disconnect_headset)
+        self.connect_btn.setEnabled(True)
+
+        self.start_eeg_stream_btn.setEnabled(True)
+        self.start_marker_stream_btn.setEnabled(True)
+        self.start_viz_btn.setEnabled(True)
+        self.start_recording_btn.setEnabled(True)
+        self.task_launcher_btn.setEnabled(True)
+
+        self.setup_streaming_channels()
+
+        # Start data pump at 60 Hz regardless of visualization state
+        self.stream_timer.start(16)
+
+        ch_preview = ', '.join(self.channel_names[:8])
+        if len(self.channel_names) > 8:
+            ch_preview += f", … (+{len(self.channel_names) - 8} more)"
+        QMessageBox.information(
+            self, "Headset Connected",
+            f"{status}\nChannels: {ch_preview}"
+        )
 
     def disconnect_headset(self):
-        """Disconnect from headset"""
+        """Disconnect from headset (BrainFlow or LSL inlet)."""
         try:
             if self.streaming_active:
                 self.toggle_streaming_visualization()
 
-            # Stop the data pump before releasing the board
+            # Stop the data pump before releasing the source
             self.stream_timer.stop()
 
+            # BrainFlow board
             if self.board is not None:
                 self.board.stop_stream()
                 self.board.release_session()
                 self.board = None
+
+            # LSL inlet
+            if self.lsl_inlet is not None:
+                self.lsl_inlet.close_stream()
+                self.lsl_inlet = None
+
+            self.headset_source = None
+            self.channel_names  = []
+            self.num_channels   = 0
 
             if self.eeg_outlet is not None:
                 del self.eeg_outlet
@@ -2586,7 +2783,7 @@ class SegmentViewer(QMainWindow):
             self.start_recording_btn.setEnabled(False)
             self.start_recording_btn.setText("Start Recording")
             self.start_recording_btn.setStyleSheet("")
-            self.motor_imagery_btn.setEnabled(False)
+            self.task_launcher_btn.setEnabled(False)
 
             self.eeg_stream_status.setText("EEG Stream: Inactive")
             self.eeg_stream_status.setStyleSheet("color: gray;")
@@ -2802,29 +2999,41 @@ class SegmentViewer(QMainWindow):
     def toggle_manual_recording(self):
         """Start or stop a manual XDF recording from the main UI button."""
         if self.xdf_recorder is not None:
-            # Currently recording — stop
+            # Currently recording — stop and auto-advance trial number
             self.stop_xdf_recording()
+            self.trial_spinbox.setValue(self.trial_spinbox.value() + 1)
             return
 
-        # --- Choose save location ---
-        chosen_dir = QFileDialog.getExistingDirectory(
-            self, "Choose XDF Save Folder", self.xdf_save_dir
-        )
-        if not chosen_dir:
-            return  # user cancelled
-        self.xdf_save_dir = chosen_dir
+        # --- Sync patient ID from the input widget ---
+        input_id = self.patient_id_input.text().strip()
+        if input_id:
+            self.patient_id = input_id
 
-        # --- Ask for patient ID (prefill with current value if available) ---
-        default_id = self.patient_id if self.patient_id else "SUB_001"
-        patient_id, ok = QInputDialog.getText(
-            self, "Patient ID", "Enter subject / patient ID:", text=default_id
-        )
-        if not ok or not patient_id.strip():
-            return  # user cancelled or left blank
-        patient_id = patient_id.strip()
+        # Ask for patient ID only if still unknown
+        if not self.patient_id:
+            patient_id, ok = QInputDialog.getText(
+                self, "Patient ID", "Enter subject / patient ID:", text="SUB_001"
+            )
+            if not ok or not patient_id.strip():
+                return
+            self.patient_id = patient_id.strip()
+            self.patient_id_input.setText(self.patient_id)
+
+        # Ask for save directory only the first time (or if the default path doesn't exist)
+        if not self._xdf_save_dir_confirmed:
+            chosen_dir = QFileDialog.getExistingDirectory(
+                self, "Choose XDF Save Folder", self.xdf_save_dir
+            )
+            if not chosen_dir:
+                return
+            self.xdf_save_dir = chosen_dir
+            self._xdf_save_dir_confirmed = True
+
+        # Read the live trial number from the spinbox
+        self.trial_number = self.trial_spinbox.value()
 
         # --- Start recording ---
-        self.start_xdf_recording(patient_id)
+        self.start_xdf_recording(self.patient_id)
 
         # Update button to show active state
         self.start_recording_btn.setText("Stop Recording")
@@ -2945,32 +3154,46 @@ class SegmentViewer(QMainWindow):
             self.plot_widget.clear()
 
     def update_stream_data(self):
-        """Drain BrainFlow board, push to LSL/XDF, and (when active) update visualization."""
-        if self.board is None:
+        """Drain EEG source, push to LSL/XDF, and (when active) update visualization."""
+        if self.board is None and self.lsl_inlet is None:
             return
 
         try:
-            # Get new data from board
-            data = self.board.get_board_data()
+            # ── Acquire new samples ────────────────────────────────────────────
+            if self.headset_source == 'lsl_inlet':
+                samples, timestamps_lsl = self.lsl_inlet.pull_chunk(
+                    timeout=0.0, max_samples=512
+                )
+                if not samples:
+                    return
+                eeg_data = np.array(samples, dtype=np.float64).T  # (ch, samples)
+                if eeg_data.shape[0] != self.num_channels:
+                    return  # Unexpected channel count — skip
 
-            if data.shape[1] == 0:
-                return  # No new data
+                # --- Always push raw data to LSL and XDF ---
+                eeg_list = eeg_data.T.tolist()  # compute once; reused below
+                if self.eeg_outlet is not None and LSL_AVAILABLE:
+                    self.eeg_outlet.push_chunk(eeg_list)
+                if self.xdf_recorder is not None:
+                    ts_list = timestamps_lsl if timestamps_lsl else (
+                        [time.time()] * eeg_data.shape[1])
+                    self.xdf_recorder.push_eeg(ts_list, eeg_list)
 
-            # Extract EEG channels
-            eeg_data = data[self.eeg_channels, :]
+            else:
+                # BrainFlow board
+                data = self.board.get_board_data()
+                if data.shape[1] == 0:
+                    return  # No new data
+                eeg_data = data[self.eeg_channels, :]
 
-            # --- Always push raw data to LSL and XDF regardless of visualization state ---
-
-            # Send to LSL if outlet is active - use push_chunk for efficiency
-            if self.eeg_outlet is not None and LSL_AVAILABLE:
-                chunk = eeg_data.T.tolist()
-                self.eeg_outlet.push_chunk(chunk)
-
-            # Push raw (unfiltered) EEG to XDF recorder if active
-            if self.xdf_recorder is not None and BRAINFLOW_AVAILABLE:
-                ts_ch = BoardShim.get_timestamp_channel(self.board_id)  # type: ignore[union-attr]
-                timestamps = data[ts_ch, :].tolist()
-                self.xdf_recorder.push_eeg(timestamps, eeg_data.T.tolist())
+                # --- Always push raw data to LSL and XDF ---
+                eeg_list = eeg_data.T.tolist()  # compute once; reused below
+                if self.eeg_outlet is not None and LSL_AVAILABLE:
+                    self.eeg_outlet.push_chunk(eeg_list)
+                if self.xdf_recorder is not None and BRAINFLOW_AVAILABLE:
+                    ts_ch = BoardShim.get_timestamp_channel(self.board_id)
+                    timestamps = data[ts_ch, :].tolist()
+                    self.xdf_recorder.push_eeg(timestamps, eeg_list)
 
             # --- Everything below is visualization-only ---
             if not self.streaming_active:
@@ -3015,6 +3238,20 @@ class SegmentViewer(QMainWindow):
 
         except Exception as e:
             print(f"Error updating stream: {str(e)}")
+            # If the LSL inlet dropped, stop cleanly and notify the user
+            if self.headset_source == 'lsl_inlet' and self.streaming_active:
+                self.stream_timer.stop()
+                self.streaming_active = False
+                self.start_viz_btn.setText("Start Visualization")
+                self.start_viz_btn.setStyleSheet("")
+                self.play_pause_btn.setText("Start Streaming")
+                self.file_mode_radio.setEnabled(True)
+                self.stream_mode_radio.setEnabled(True)
+                msg = (f"Lost connection to LSL inlet:\n{e}\n\n"
+                       "Reconnect the headset and press 'Auto-Connect Headset' again.")
+                QTimer.singleShot(0, lambda m=msg: QMessageBox.warning(
+                    self, "LSL Stream Lost", m
+                ))
 
     def calculate_filter_coefficients(self):
         """Pre-calculate filter coefficients for efficient signal processing"""
@@ -3075,22 +3312,54 @@ class SegmentViewer(QMainWindow):
         return processed
 
     def smooth_display_data(self, data):
-        """Apply OpenBCI-style moving average smoothing to data for display.
-        Uses centered window with edge extension so values don't spike at boundaries."""
+        """Apply display smoothing to a channel's rolling buffer.
+
+        Two modes controlled by self.smooth_type:
+          'Box Filter' — uniform moving average; self.smooth_seconds = window in seconds (10–500 ms)
+          'EMA'        — causal exponential moving average; self.smooth_seconds = alpha (0.05–0.95)
+
+        NaN handling: NaN gaps are filled via interpolation before the box filter
+        (eliminates the zero-boundary artifact), then restored afterwards.
+        For EMA the filter simply starts from the first valid sample.
+        """
         if not self.smoothing_enabled:
-            return data
-        win = max(1, int(self.smooth_seconds * self.sampling_rate))
-        if win <= 1 or not SCIPY_AVAILABLE:
             return data
         nan_mask = np.isnan(data)
         if np.all(nan_mask):
             return data
-        clean = np.where(nan_mask, 0.0, data)
-        # uniform_filter1d with mode='nearest' extends edge values
-        # instead of dividing by a shrinking window (no edge spikes)
-        out = uniform_filter1d(clean, size=win, mode='nearest')
-        out[nan_mask] = np.nan
-        return out
+
+        if self.smooth_type == 'EMA':
+            alpha = float(np.clip(self.smooth_seconds, 0.05, 0.95))
+            out = data.copy()
+            first_valid = int(np.argmax(~nan_mask))
+            if nan_mask[first_valid]:  # all-NaN guard
+                return data
+            prev = data[first_valid]
+            for i in range(valid_idx[0], len(data)):
+                if nan_mask[i]:
+                    out[i] = np.nan
+                else:
+                    prev = alpha * data[i] + (1.0 - alpha) * prev
+                    out[i] = prev
+            return out
+
+        else:  # Box Filter
+            if not SCIPY_AVAILABLE:
+                return data
+            win = max(1, int(self.smooth_seconds * self.sampling_rate))
+            if win <= 1:
+                return data
+            out = data.copy()
+            if nan_mask.any():
+                idx = np.arange(len(out))
+                valid = ~nan_mask
+                if valid.any():
+                    out = np.interp(idx, idx[valid], out[valid])
+                else:
+                    return data
+            out = uniform_filter1d(out, size=win, mode='nearest')
+            out[nan_mask] = np.nan
+            return out
 
     def update_streaming_plots(self):
         """Update plot widgets with streaming data - applies OpenBCI-style smoothing at display time"""
@@ -3335,8 +3604,9 @@ class SegmentViewer(QMainWindow):
         self.band_power_plot_widget.setYRange(0, self.band_power_y_max * 1.1)
 
     def motor_imagery_task(self):
-        # Create a separate pop-up window for the task
-        self.task_window = QMainWindow(self)
+        # Parentless window so QWebEngineView's GPU compositor does not
+        # interfere with pyqtgraph's OpenGL context in the main window.
+        self.task_window = QMainWindow()
         self.task_window.setWindowTitle("Neural Data Acquisition Task")
         self.task_window.resize(1024, 768)
 
@@ -3347,14 +3617,45 @@ class SegmentViewer(QMainWindow):
         # Set up the two-way communication channel
         self.channel = QWebChannel()
         self.bridge = TaskWebBridge(self)
-        self.channel.registerObject("pyBridge", self.bridge) # "pyBridge" is the JS name
+        self.channel.registerObject("pyBridge", self.bridge)
         self.web_view.page().setWebChannel(self.channel)
 
-        # Load your local index.html file
-        html_path = resource_path("index.html")
+        # Pre-fill form fields once the page is loaded
+        self.web_view.loadFinished.connect(self._prefill_task_form)
+
+        # Load motor imagery task HTML
+        html_path = resource_path(os.path.join("tasks", "motor_imagery", "index.html"))
         self.web_view.setUrl(QUrl.fromLocalFile(html_path))
 
         self.task_window.show()
+
+    def _prefill_task_form(self, ok: bool):
+        """Inject subject ID and save directory into the motor imagery web form."""
+        if not ok:
+            return
+        subject_id = self.patient_id_input.text().strip() or self.patient_id
+        save_dir   = self.xdf_save_dir
+        js = (
+            f"(function(){{"
+            f"  var sid = document.getElementById('subName');"
+            f"  var sdir = document.getElementById('saveDir');"
+            f"  if(sid && !sid.value) sid.value = {json.dumps(subject_id)};"
+            f"  if(sdir && !sdir.value) sdir.value = {json.dumps(save_dir)};"
+            f"}})();"
+        )
+        self.web_view.page().runJavaScript(js)
+
+    def launch_prosthetic(self):
+        """Launch the Prosthetic Control window."""
+        try:
+            from Prosthetic.prosthetic_gui import ProstheticWindow
+        except ImportError as e:
+            QMessageBox.critical(self, "Import Error", f"Could not load Prosthetic module:\n{e}")
+            return
+        board    = self.board    if hasattr(self, 'board')    else None
+        board_id = self.board_id if hasattr(self, 'board_id') else None
+        win = ProstheticWindow(board, board_id, parent=self)
+        win.exec()
 
     def on_magnitude_changed(self, text):
         """Handle magnitude scale change"""
@@ -3364,10 +3665,24 @@ class SegmentViewer(QMainWindow):
             self.magnitude_scale = 100
 
     def on_smooth_slider_changed(self, value):
-        """Handle OpenBCI-style smooth slider change (value is in tens of ms)"""
-        ms = value * 10
-        self.smooth_seconds = ms / 1000.0
-        self.smooth_label.setText(f"{ms} ms")
+        """Handle smooth slider change.
+
+        Box Filter: value * 10 = window in ms (10–500 ms)
+        EMA:        value maps linearly to alpha 0.05–0.95
+        """
+        if self.smooth_type == 'EMA':
+            alpha = 0.05 + (value - 1) / 49.0 * 0.90
+            self.smooth_seconds = round(alpha, 2)
+            self.smooth_label.setText(f"α {alpha:.2f}")
+        else:
+            ms = value * 10
+            self.smooth_seconds = ms / 1000.0
+            self.smooth_label.setText(f"{ms} ms")
+
+    def on_smooth_type_changed(self, smooth_type):
+        """Switch between Box Filter and EMA smoothing."""
+        self.smooth_type = smooth_type
+        self.on_smooth_slider_changed(self.smooth_slider.value())
 
     def on_smooth_checkbox_changed(self, state):
         """Enable or disable smoothing"""
@@ -3698,7 +4013,9 @@ def main():
     prompt_update_if_available()
 
     viewer = SegmentViewer()
-    viewer.show()
+    viewer.showMaximized()    # open full-screen (keeps system taskbar)
+    viewer.activateWindow()   # bring to front on Windows
+    viewer.raise_()           # raise above other windows
     sys.exit(app.exec())
 
 
