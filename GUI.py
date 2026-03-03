@@ -629,7 +629,7 @@ class SegmentViewer(QMainWindow):
         self.smoothed_band_power = {}  # Stores smoothed band power
         self.band_power_y_max = 0.0  # Stable Y-axis max for band power
         
-        self.setWindowTitle("EEG Viewer - No File Loaded")
+        self.setWindowTitle("Longhorn Neural Interface Platform - No File Loaded")
         self.setGeometry(100, 100, 1600, 900)
         self.setWindowIcon(QIcon(resource_path("icon.png")))
 
@@ -642,25 +642,26 @@ class SegmentViewer(QMainWindow):
         left_panel = QWidget()
         left_panel.setMaximumWidth(350)
         left_panel_layout = QVBoxLayout(left_panel)
+        left_panel_layout.setContentsMargins(4, 4, 4, 4)
 
         # ---- Brand banner (top-left) ----------------------------------------
         self._banner_menu = QMenu(self)
         self._banner_menu.setStyleSheet("""
             QMenu {
-                background-color: #213C58;
-                border: 1px solid #598BBC;
+                background-color: rgba(33, 60, 88, 0.5);
+                border: 1px solid rgba(89, 139, 188, 0.5);
                 border-radius: 6px;
                 padding: 4px 0px;
             }
             QMenu::item {
-                color: #F9F6EE;
-                padding: 8px 18px 8px 14px;
-                font-size: 13px;
+                color: rgba(249, 246, 238, 0.5);
+                padding: 6px 12px;
+                font-size: 12px;
                 font-weight: 600;
             }
             QMenu::item:selected {
-                background: #598BBC;
-                color: white;
+                background: rgba(89, 139, 188, 0.5);
+                color: rgba(255, 255, 255, 0.8);
                 border-radius: 4px;
             }
         """)
@@ -678,25 +679,25 @@ class SegmentViewer(QMainWindow):
         self.banner_btn.setMenu(self._banner_menu)
         _banner_pix = QPixmap(resource_path("banner.png"))
         if not _banner_pix.isNull():
-            _banner_pix = _banner_pix.scaledToWidth(
-                320, Qt.TransformationMode.SmoothTransformation)
+            _banner_pix = _banner_pix.scaledToHeight(
+                48, Qt.TransformationMode.SmoothTransformation)
             self.banner_btn.setIcon(QIcon(_banner_pix))
             self.banner_btn.setIconSize(_banner_pix.size())
+            self.banner_btn.setFixedSize(_banner_pix.size())
+            self._banner_menu.setMinimumWidth(_banner_pix.width())
         self.banner_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.banner_btn.setStyleSheet("""
             QToolButton {
                 border: none;
                 background: transparent;
-                padding: 4px;
+                padding: 0px;
+                margin: 0px;
             }
-            QToolButton:hover {
-                background: rgba(89, 139, 188, 0.15);
-                border-radius: 4px;
-            }
+            QToolButton:hover { background: rgba(89, 139, 188, 0.15); }
             QToolButton::menu-indicator { image: none; }
         """)
-        self.banner_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        left_panel_layout.addWidget(self.banner_btn)
+        left_panel_layout.addWidget(self.banner_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        left_panel_layout.setSpacing(4)
 
         # Mode selection
         mode_group = QGroupBox("Mode Selection")
@@ -1253,7 +1254,7 @@ class SegmentViewer(QMainWindow):
             self.last_horizontal_zoom_value = int(self.window_size_sec * 10)
             
             # Update window title
-            self.setWindowTitle(f"Segment Viewer - {self.current_filename} - {self.num_windows} windows, {self.num_channels} channels")
+            self.setWindowTitle(f"Longhorn Neural Interface Platform - {self.current_filename}  |  {self.num_windows} windows · {self.num_channels} ch")
             
             # Hide "no file" label before setting up plots (which will delete it)
             if hasattr(self, 'no_file_label') and self.no_file_label is not None:
@@ -3217,7 +3218,7 @@ class SegmentViewer(QMainWindow):
             # Setup visualization
             self.file_loaded = True
             self.current_filename = "Live Stream"
-            self.setWindowTitle("EEG Viewer - Live Streaming")
+            self.setWindowTitle("Longhorn Neural Interface Platform - Live Streaming")
 
             # Setup plot based on current display mode
             if self.display_mode == 'overlay':
