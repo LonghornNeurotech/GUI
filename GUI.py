@@ -203,14 +203,19 @@ class TaskWebBridge(QObject):
         The JS side sends JSON like: {"stop": "BLINK", "start": "LEFT"}
         """
         print(f"[Marker] {marker_val}")
+        ts = time.time()
 
         # Send marker via LSL if the stream is active
         if self.main_window.marker_outlet is not None and LSL_AVAILABLE:
             self.main_window.marker_outlet.push_sample([marker_val])
 
-        # Push directly to XDF recorder (works even without visualization)
+        # Push directly to XDF recorder.
+        # If the recorder isn't ready yet (start_streams race), buffer the marker
+        # and flush it as soon as recording begins.
         if self.main_window.xdf_recorder is not None:
-            self.main_window.xdf_recorder.push_marker(time.time(), marker_val)
+            self.main_window.xdf_recorder.push_marker(ts, marker_val)
+        else:
+            self.main_window._pending_markers.append((ts, marker_val))
 
     @pyqtSlot()
     def pick_save_dir(self):
@@ -574,6 +579,7 @@ class SegmentViewer(QMainWindow):
         self.xdf_recorder = None
         self.xdf_save_dir = os.path.expanduser("~/Documents/EEG_Recordings")
         self._xdf_save_dir_confirmed = False  # True after user has picked a dir at least once
+        self._pending_markers = []            # markers that arrived before XDF recorder was ready
         self.markers = []           # [(time_sec: float, label: str)] for loaded file
         self._marker_inf_lines = [] # currently displayed InfiniteLine objects
 
@@ -722,22 +728,89 @@ class SegmentViewer(QMainWindow):
         self.start_recording_btn.setEnabled(False)
         stream_layout.addWidget(self.start_recording_btn)
 
-        # Task launcher dropdown button
+        # Task launcher dropdown — sleek combo-style button
         self._task_menu = QMenu(self)
+        self._task_menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a2e;
+                border: 1px solid #3dba55;
+                border-radius: 6px;
+                padding: 4px 0px;
+            }
+            QMenu::item {
+                color: #e8e8e8;
+                padding: 8px 18px 8px 14px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QMenu::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #52c96a, stop:1 #3dba55);
+                color: white;
+                border-radius: 4px;
+            }
+            QMenu::item:disabled { color: #555; }
+            QMenu::separator {
+                height: 1px;
+                background: #2e2e4a;
+                margin: 3px 8px;
+            }
+        """)
+
         mi_action = QAction("Motor Imagery Task", self)
-        mi_action.triggered.connect(self.motor_imagery_task)
+        mi_action.triggered.connect(
+            lambda: (setattr(self, '_active_task', "Motor Imagery Task"),
+                     self.task_launcher_btn.setText("Motor Imagery Task"),
+                     self.motor_imagery_task()))
         prosthetic_action = QAction("Prosthetic Control", self)
-        prosthetic_action.triggered.connect(self.launch_prosthetic)
+        prosthetic_action.triggered.connect(
+            lambda: (setattr(self, '_active_task', "Prosthetic Control"),
+                     self.task_launcher_btn.setText("Prosthetic Control"),
+                     self.launch_prosthetic()))
         self._task_menu.addAction(mi_action)
         self._task_menu.addAction(prosthetic_action)
 
+        self._active_task = "Motor Imagery Task"
         self.task_launcher_btn = QToolButton()
-        self.task_launcher_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.task_launcher_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.task_launcher_btn.setMenu(self._task_menu)
-        self.task_launcher_btn.setDefaultAction(mi_action)
+        self.task_launcher_btn.setText("Motor Imagery Task")
+        self.task_launcher_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.task_launcher_btn.setEnabled(False)
-        self.task_launcher_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         self.task_launcher_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.task_launcher_btn.setStyleSheet("""
+            QToolButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #52c96a, stop:1 #3dba55);
+                color: white;
+                font-weight: bold;
+                font-size: 13px;
+                border: 1px solid #2a8c40;
+                border-radius: 6px;
+                padding: 6px 28px 6px 12px;
+                text-align: left;
+            }
+            QToolButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #63d97c, stop:1 #4dcc65);
+                border-color: #3dba55;
+            }
+            QToolButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #3dba55, stop:1 #2e8c40);
+            }
+            QToolButton:disabled {
+                background: #2a2a3a;
+                color: #555;
+                border-color: #3a3a4a;
+            }
+            QToolButton::menu-indicator {
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                right: 10px;
+                width: 10px;
+            }
+        """)
         stream_layout.addWidget(self.task_launcher_btn)
 
         self.stream_group.setLayout(stream_layout)
@@ -2985,6 +3058,13 @@ class SegmentViewer(QMainWindow):
             channel_names=ch_names,
         )
         self.xdf_recorder.start()
+
+        # Flush any markers that arrived before the recorder was ready
+        if self._pending_markers:
+            for ts, val in self._pending_markers:
+                self.xdf_recorder.push_marker(ts, val)
+            print(f"[XDF] Flushed {len(self._pending_markers)} buffered marker(s)")
+            self._pending_markers.clear()
 
     def stop_xdf_recording(self):
         """Finalise and save the XDF file."""

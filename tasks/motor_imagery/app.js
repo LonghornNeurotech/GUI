@@ -214,15 +214,22 @@ function startTest() {
     previousState = "None";
     state = "BLINK";
     cueSide = "";
-    startTime = Date.now();
 
-    // First marker: None → BLINK
-    sendMarker("None", "BLINK");
+    // Delay task start slightly so Python has time to finish initialising
+    // the XDF recorder and LSL outlets before the first marker arrives.
+    // Without this, "None→BLINK" races against start_streams and can be
+    // silently dropped from the XDF file.
+    setTimeout(() => {
+        startTime = Date.now();
 
-    // Wait for fonts to be ready before drawing on canvas
-    document.fonts.ready.then(() => {
-        requestAnimationFrame(update);
-    });
+        // First marker: None → BLINK
+        sendMarker("None", "BLINK");
+
+        // Wait for fonts to be ready before drawing on canvas
+        document.fonts.ready.then(() => {
+            requestAnimationFrame(update);
+        });
+    }, 200);
 }
 
 // --- Main loop ---------------------------------------------------------------

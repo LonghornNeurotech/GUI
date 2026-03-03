@@ -1,5 +1,4 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda",
-    "python.defaultInterpreterPath": "C:\\Users\\D0NMEGA\\anaconda3\\python.exe"
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }
