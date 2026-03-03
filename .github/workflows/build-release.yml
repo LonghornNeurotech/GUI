@@ -8,12 +8,14 @@ on:
       - '**.py'                                  # Any Python file anywhere in the repo
       - 'requirements.txt'                       # Changes to your dependencies
       - '.github/workflows/build-release.yml'    # Changes to this workflow file itself
-      - '*.html'                                 # Web UI markup
-      - '*.js'                                   # Web UI scripts
-      - '*.css'                                  # Web UI styles
+      - '*.html'                                 # Web UI markup (root)
+      - '*.js'                                   # Web UI scripts (root)
+      - '*.css'                                  # Web UI styles (root)
       - '*.jpg'                                  # Bundled images (e.g. beach.jpg)
       - '*.png'                                  # Bundled images (e.g. app icon)
-      - '*.woff2'                                # Bundled fonts
+      - '*.woff2'                                # Bundled fonts (root)
+      - 'tasks/**'                               # Task sub-UIs (html/js/css/fonts)
+      - 'Prosthetic/**'                          # Prosthetic control module
 
 jobs:
   build:
@@ -52,12 +54,13 @@ jobs:
           --hidden-import=PyQt6.QtOpenGL
           --hidden-import=PyQt6.QtOpenGLWidgets
           --hidden-import=PyQt6.sip
+          --hidden-import=Prosthetic.prosthetic_gui
           --icon "145164501.png"
-          --add-data "index.html${{ runner.os == 'Windows' && ';' || ':' }}."
-          --add-data "app.js${{ runner.os == 'Windows' && ';' || ':' }}."
-          --add-data "styles.css${{ runner.os == 'Windows' && ';' || ':' }}."
+          --add-data "tasks/motor_imagery/index.html${{ runner.os == 'Windows' && ';' || ':' }}tasks/motor_imagery"
+          --add-data "tasks/motor_imagery/app.js${{ runner.os == 'Windows' && ';' || ':' }}tasks/motor_imagery"
+          --add-data "tasks/motor_imagery/styles.css${{ runner.os == 'Windows' && ';' || ':' }}tasks/motor_imagery"
+          --add-data "tasks/motor_imagery/SpaceGrotesk.woff2${{ runner.os == 'Windows' && ';' || ':' }}tasks/motor_imagery"
           --add-data "beach.jpg${{ runner.os == 'Windows' && ';' || ':' }}."
-          --add-data "SpaceGrotesk.woff2${{ runner.os == 'Windows' && ';' || ':' }}."
           --add-data "version.py${{ runner.os == 'Windows' && ';' || ':' }}."
           --name NeuroTechGUI_${{ runner.os }} GUI.py
 
@@ -69,12 +72,13 @@ jobs:
           --hidden-import=PyQt6.QtOpenGL
           --hidden-import=PyQt6.QtOpenGLWidgets
           --hidden-import=PyQt6.sip
+          --hidden-import=Prosthetic.prosthetic_gui
           --icon "145164501.png"
-          --add-data "index.html:."
-          --add-data "app.js:."
-          --add-data "styles.css:."
+          --add-data "tasks/motor_imagery/index.html:tasks/motor_imagery"
+          --add-data "tasks/motor_imagery/app.js:tasks/motor_imagery"
+          --add-data "tasks/motor_imagery/styles.css:tasks/motor_imagery"
+          --add-data "tasks/motor_imagery/SpaceGrotesk.woff2:tasks/motor_imagery"
           --add-data "beach.jpg:."
-          --add-data "SpaceGrotesk.woff2:."
           --add-data "version.py:."
           --name NeuroTechGUI_macOS GUI.py
 
@@ -94,7 +98,7 @@ jobs:
           # Import certificate to keychain
           security import $CERT_PATH -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
-          
+
       - name: Sign the macOS App
         if: runner.os == 'macOS'
         run: |
