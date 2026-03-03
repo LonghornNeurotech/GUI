@@ -1367,11 +1367,33 @@ class SegmentViewer(QMainWindow):
             stype = s['info']['type'][0].upper()
             fmt   = s['info'].get('channel_format', ['float32'])[0]
             ts    = s['time_stamps']
-            if ts is None or len(ts) == 0:
+            if ts is None or (hasattr(ts, '__len__') and len(ts) == 0):
                 continue
-            if stype in ('MARKERS', 'MARKER') or fmt == 'string':
+            if stype in ('MARKERS', 'MARKER', 'EVENTS', 'EVENT',
+                         'STIM', 'STIMULUS', 'TRIGGER') or fmt == 'string':
                 for stamp, row in zip(ts, s['time_series']):
-                    label = str(row[0]) if row else ''
+                    # row may be a numpy array (numeric markers) or a list
+                    # of strings (string markers).  Avoid bare `if row`
+                    # which raises ValueError on multi-element arrays.
+                    if hasattr(row, '__len__') and len(row) == 0:
+                        continue
+                    val = row[0]
+                    if fmt == 'string':
+                        label = str(val).strip()
+                    else:
+                        # Numeric marker: use the first channel as the event
+                        # code.  Skip 0 values which typically mean "no event".
+                        try:
+                            numeric_val = float(val)
+                        except (TypeError, ValueError):
+                            continue
+                        if numeric_val == 0:
+                            continue
+                        # Represent as an integer when possible for readability
+                        if numeric_val == int(numeric_val):
+                            label = str(int(numeric_val))
+                        else:
+                            label = str(numeric_val)
                     if label:
                         markers.append((stamp - t0, label))
         markers.sort(key=lambda x: x[0])
@@ -2071,6 +2093,8 @@ class SegmentViewer(QMainWindow):
         """
         try:
             data = json.loads(label)
+            if not isinstance(data, dict):
+                return str(label)
             stop  = data.get('stop',  '') or ''
             start = data.get('start', '') or ''
             if stop and start:
