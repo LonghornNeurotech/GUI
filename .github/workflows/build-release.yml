@@ -5,17 +5,17 @@ on:
     branches:
       - main
     paths:
-      - '**.py'                                  # Any Python file anywhere in the repo
-      - 'requirements.txt'                       # Changes to your dependencies
-      - '.github/workflows/build-release.yml'    # Changes to this workflow file itself
-      - '*.html'                                 # Web UI markup (root)
-      - '*.js'                                   # Web UI scripts (root)
-      - '*.css'                                  # Web UI styles (root)
-      - '*.jpg'                                  # Bundled images (e.g. beach.jpg)
-      - '*.png'                                  # Bundled images (e.g. app icon)
-      - '*.woff2'                                # Bundled fonts (root)
-      - 'tasks/**'                               # Task sub-UIs (html/js/css/fonts)
-      - 'Prosthetic/**'                          # Prosthetic control module
+      - '**.py'
+      - 'requirements.txt'
+      - '.github/workflows/build-release.yml'
+      - '*.html'
+      - '*.js'
+      - '*.css'
+      - '*.jpg'
+      - '*.png'
+      - '*.woff2'
+      - 'tasks/**'
+      - 'Prosthetic/**'
 
 jobs:
   build:
@@ -23,7 +23,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # Runs three parallel jobs for Linux, Mac, and Windows
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
@@ -46,41 +45,57 @@ jobs:
         run: |
           echo 'CURRENT_VERSION = "build-${{ github.run_number }}"' > version.py
 
+      # Set a single APP_NAME env var used by all subsequent steps.
+      # Tag stays "build-N" for the version-checker; the human-readable
+      # label and filenames use the professional "LonghornNIL_vN" format.
+      - name: Set app name
+        shell: bash
+        run: |
+          echo "APP_NAME=LonghornNeuralInterface_${{ runner.os }}_v1.${{ github.run_number }}" >> $GITHUB_ENV
+
       - name: Build Executable (Windows & Linux)
         if: runner.os != 'macOS'
-        run: >-
-          pyinstaller --onefile --windowed
-          --collect-all mne --collect-all brainflow --collect-all pylsl
-          --hidden-import=PyQt6.QtOpenGL
-          --hidden-import=PyQt6.QtOpenGLWidgets
-          --hidden-import=PyQt6.sip
-          --hidden-import=Prosthetic.prosthetic_gui
-          --icon "145164501.png"
-          --add-data "tasks/motor_imagery/index.html${{ runner.os == 'Windows' && ';' || ':' }}tasks/motor_imagery"
-          --add-data "tasks/motor_imagery/app.js${{ runner.os == 'Windows' && ';' || ':' }}tasks/motor_imagery"
-          --add-data "tasks/motor_imagery/styles.css${{ runner.os == 'Windows' && ';' || ':' }}tasks/motor_imagery"
-          --add-data "tasks/motor_imagery/SpaceGrotesk.woff2${{ runner.os == 'Windows' && ';' || ':' }}tasks/motor_imagery"
-          --add-data "beach.jpg${{ runner.os == 'Windows' && ';' || ':' }}."
-          --add-data "version.py${{ runner.os == 'Windows' && ';' || ':' }}."
-          --name NeuroTechGUI_${{ runner.os }} GUI.py
+        shell: bash
+        run: |
+          SEP=$([[ "${{ runner.os }}" == "Windows" ]] && echo ";" || echo ":")
+          pyinstaller --onefile --windowed \
+            --collect-all mne --collect-all brainflow --collect-all pylsl \
+            --hidden-import=PyQt6.QtOpenGL \
+            --hidden-import=PyQt6.QtOpenGLWidgets \
+            --hidden-import=PyQt6.sip \
+            --hidden-import=Prosthetic.prosthetic_gui \
+            --icon "icon.png" \
+            --add-data "tasks/motor_imagery/index.html${SEP}tasks/motor_imagery" \
+            --add-data "tasks/motor_imagery/app.js${SEP}tasks/motor_imagery" \
+            --add-data "tasks/motor_imagery/styles.css${SEP}tasks/motor_imagery" \
+            --add-data "tasks/motor_imagery/SpaceGrotesk.woff2${SEP}tasks/motor_imagery" \
+            --add-data "beach.jpg${SEP}." \
+            --add-data "icon.png${SEP}." \
+            --add-data "banner.png${SEP}." \
+            --add-data "version.py${SEP}." \
+            --name "$APP_NAME" \
+            GUI.py
 
       - name: Build .app Bundle (macOS)
         if: runner.os == 'macOS'
-        run: >-
-          pyinstaller --windowed
-          --collect-all mne --collect-all brainflow --collect-all pylsl
-          --hidden-import=PyQt6.QtOpenGL
-          --hidden-import=PyQt6.QtOpenGLWidgets
-          --hidden-import=PyQt6.sip
-          --hidden-import=Prosthetic.prosthetic_gui
-          --icon "145164501.png"
-          --add-data "tasks/motor_imagery/index.html:tasks/motor_imagery"
-          --add-data "tasks/motor_imagery/app.js:tasks/motor_imagery"
-          --add-data "tasks/motor_imagery/styles.css:tasks/motor_imagery"
-          --add-data "tasks/motor_imagery/SpaceGrotesk.woff2:tasks/motor_imagery"
-          --add-data "beach.jpg:."
-          --add-data "version.py:."
-          --name NeuroTechGUI_macOS GUI.py
+        run: |
+          pyinstaller --windowed \
+            --collect-all mne --collect-all brainflow --collect-all pylsl \
+            --hidden-import=PyQt6.QtOpenGL \
+            --hidden-import=PyQt6.QtOpenGLWidgets \
+            --hidden-import=PyQt6.sip \
+            --hidden-import=Prosthetic.prosthetic_gui \
+            --icon "icon.png" \
+            --add-data "tasks/motor_imagery/index.html:tasks/motor_imagery" \
+            --add-data "tasks/motor_imagery/app.js:tasks/motor_imagery" \
+            --add-data "tasks/motor_imagery/styles.css:tasks/motor_imagery" \
+            --add-data "tasks/motor_imagery/SpaceGrotesk.woff2:tasks/motor_imagery" \
+            --add-data "beach.jpg:." \
+            --add-data "icon.png:." \
+            --add-data "banner.png:." \
+            --add-data "version.py:." \
+            --name "$APP_NAME" \
+            GUI.py
 
       - name: Install Apple Certificate
         if: runner.os == 'macOS'
@@ -88,29 +103,28 @@ jobs:
           CERT_BASE64: ${{ secrets.MAC_CERTS_BASE64 }}
           CERT_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
         run: |
-          # Create a temporary keychain
           CERT_PATH=$RUNNER_TEMP/build_certificate.p12
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           echo -n "$CERT_BASE64" | base64 --decode -o $CERT_PATH
           security create-keychain -p "actions" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "actions" $KEYCHAIN_PATH
-          # Import certificate to keychain
           security import $CERT_PATH -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
 
       - name: Sign the macOS App
         if: runner.os == 'macOS'
         run: |
-          # --options runtime enables the "Hardened Runtime" (mandatory for notarization)
-          # --deep ensures all hidden dependencies (like mne's math libraries) are signed
-          codesign --deep --force --options runtime --sign "Developer ID Application" dist/NeuroTechGUI_macOS.app
+          codesign --deep --force --options runtime \
+            --sign "Developer ID Application" \
+            "dist/${APP_NAME}.app"
 
       - name: Zip for Notarization
         if: runner.os == 'macOS'
         run: |
-          # Using 'ditto' instead of 'zip' preserves critical Mac resource forks and signatures
-          /usr/bin/ditto -c -k --keepParent dist/NeuroTechGUI_macOS.app dist/NeuroTechGUI_macOS.zip
+          /usr/bin/ditto -c -k --keepParent \
+            "dist/${APP_NAME}.app" \
+            "dist/${APP_NAME}.zip"
 
       - name: Notarize the App
         if: runner.os == 'macOS'
@@ -119,8 +133,7 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          # Submit the zip to Apple and wait for the results
-          xcrun notarytool submit dist/NeuroTechGUI_macOS.zip \
+          xcrun notarytool submit "dist/${APP_NAME}.zip" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_PASSWORD" \
             --team-id "$TEAM_ID" \
@@ -129,11 +142,11 @@ jobs:
       - name: Staple the Ticket and Final Zip
         if: runner.os == 'macOS'
         run: |
-          # Attach the approval ticket directly to the .app bundle
-          xcrun stapler staple dist/NeuroTechGUI_macOS.app
-          # Delete the old zip and create a new one containing the fully stapled app
-          rm dist/NeuroTechGUI_macOS.zip
-          /usr/bin/ditto -c -k --keepParent dist/NeuroTechGUI_macOS.app dist/NeuroTechGUI_macOS.zip
+          xcrun stapler staple "dist/${APP_NAME}.app"
+          rm "dist/${APP_NAME}.zip"
+          /usr/bin/ditto -c -k --keepParent \
+            "dist/${APP_NAME}.app" \
+            "dist/${APP_NAME}.zip"
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
@@ -144,23 +157,23 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: build # Waits for all 3 builds to finish successfully
+    needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Crucial: Allows GitHub Actions to create the Release
+      contents: write
 
     steps:
       - name: Download all Artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true # Dumps all OS executables into a single folder
+          merge-multiple: true
 
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
-          # Automatically tags the release using the GitHub Run Number (e.g., build-42)
           tag_name: build-${{ github.run_number }}
-          name: "Automated Build #${{ github.run_number }}"
-          body: "Auto-generated executables created from a push to the main branch."
+          name: "Longhorn Neural Interface Platform v1.${{ github.run_number }}"
+          body: |
+            Download the appropriate build for your operating system below (Windows .exe, macOS .zip, or Linux executable).
           files: artifacts/*

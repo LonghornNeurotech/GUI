@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QInputDialog, QToolButton, QSizePolicy, QProgressBar, QGridLayout
 )
 from PyQt6.QtCore import Qt, QTimer, QSize
-from PyQt6.QtGui import QPalette, QColor, QKeySequence, QShortcut, QAction
+from PyQt6.QtGui import QPalette, QColor, QKeySequence, QShortcut, QAction, QIcon, QPixmap, QDesktopServices
 import platform
 import time
 import struct
@@ -631,6 +631,7 @@ class SegmentViewer(QMainWindow):
         
         self.setWindowTitle("EEG Viewer - No File Loaded")
         self.setGeometry(100, 100, 1600, 900)
+        self.setWindowIcon(QIcon(resource_path("icon.png")))
 
         # Main widget and layout
         main_widget = QWidget()
@@ -641,6 +642,61 @@ class SegmentViewer(QMainWindow):
         left_panel = QWidget()
         left_panel.setMaximumWidth(350)
         left_panel_layout = QVBoxLayout(left_panel)
+
+        # ---- Brand banner (top-left) ----------------------------------------
+        self._banner_menu = QMenu(self)
+        self._banner_menu.setStyleSheet("""
+            QMenu {
+                background-color: #213C58;
+                border: 1px solid #598BBC;
+                border-radius: 6px;
+                padding: 4px 0px;
+            }
+            QMenu::item {
+                color: #F9F6EE;
+                padding: 8px 18px 8px 14px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QMenu::item:selected {
+                background: #598BBC;
+                color: white;
+                border-radius: 4px;
+            }
+        """)
+        _website_action = QAction("Visit Website", self)
+        _website_action.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://lhneurotech.com/")))
+        _github_action = QAction("Visit GitHub", self)
+        _github_action.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://github.com/LonghornNeurotech")))
+        self._banner_menu.addAction(_website_action)
+        self._banner_menu.addAction(_github_action)
+
+        self.banner_btn = QToolButton()
+        self.banner_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.banner_btn.setMenu(self._banner_menu)
+        _banner_pix = QPixmap(resource_path("banner.png"))
+        if not _banner_pix.isNull():
+            _banner_pix = _banner_pix.scaledToWidth(
+                320, Qt.TransformationMode.SmoothTransformation)
+            self.banner_btn.setIcon(QIcon(_banner_pix))
+            self.banner_btn.setIconSize(_banner_pix.size())
+        self.banner_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.banner_btn.setStyleSheet("""
+            QToolButton {
+                border: none;
+                background: transparent;
+                padding: 4px;
+            }
+            QToolButton:hover {
+                background: rgba(89, 139, 188, 0.15);
+                border-radius: 4px;
+            }
+            QToolButton::menu-indicator { image: none; }
+        """)
+        self.banner_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        left_panel_layout.addWidget(self.banner_btn)
 
         # Mode selection
         mode_group = QGroupBox("Mode Selection")
@@ -3865,24 +3921,90 @@ class SegmentViewer(QMainWindow):
             """)
 
         else:
-            # Light theme
-            style = QApplication.style()
-            if style is not None:
-                palette = style.standardPalette()
-                if palette is not None:
-                    app.setPalette(palette)
-            pg.setConfigOption('background', 'w')
-            pg.setConfigOption('foreground', 'k')
+            # Light theme — clean white with Longhorn palette accents
+            # 213C58 = dark navy, 598BBC = steel blue, F9F6EE = warm off-white
+            # FFEBAD = pale gold, BF5801 = burnt orange
+            light_palette = QPalette()
+            light_palette.setColor(QPalette.ColorRole.Window, QColor(255, 255, 255))
+            light_palette.setColor(QPalette.ColorRole.WindowText, QColor(28, 40, 51))
+            light_palette.setColor(QPalette.ColorRole.Base, QColor(248, 250, 252))
+            light_palette.setColor(QPalette.ColorRole.AlternateBase, QColor(240, 244, 248))
+            light_palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 255))
+            light_palette.setColor(QPalette.ColorRole.ToolTipText, QColor(28, 40, 51))
+            light_palette.setColor(QPalette.ColorRole.Text, QColor(28, 40, 51))
+            light_palette.setColor(QPalette.ColorRole.Button, QColor(237, 242, 247))
+            light_palette.setColor(QPalette.ColorRole.ButtonText, QColor(28, 40, 51))
+            light_palette.setColor(QPalette.ColorRole.BrightText, QColor(191, 88, 1))
+            light_palette.setColor(QPalette.ColorRole.Link, QColor(89, 139, 188))
+            light_palette.setColor(QPalette.ColorRole.Highlight, QColor(89, 139, 188))
+            light_palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
+            light_palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(160, 170, 180))
+            light_palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(160, 170, 180))
+            app.setPalette(light_palette)
+
+            pg.setConfigOption('background', (248, 250, 252))
+            pg.setConfigOption('foreground', (28, 40, 51))
 
             app.setStyleSheet("""
-                QGroupBox { border: 1px solid #c0c0c0; border-radius: 5px; margin-top: 10px; padding-top: 10px; font-weight: bold; }
-                QPushButton { border: 1px solid #b0b0b0; border-radius: 4px; padding: 5px 10px; background-color: #f0f0f0; color: #1a1a1a; }
-                QPushButton:hover { background-color: #e0e0e0; border: 1px solid #909090; }
-                QPushButton:pressed { background-color: #d0d0d0; }
-                QTabBar::tab { padding: 8px 16px; }
-                QMessageBox { background-color: #f5f5f5; color: #1a1a1a; }
-                QMessageBox QLabel { color: #1a1a1a; }
-                QDialog { background-color: #f5f5f5; color: #1a1a1a; }
+                QWidget { background-color: #ffffff; color: #1c2833; }
+                QGroupBox {
+                    border: 1px solid #598BBC;
+                    border-radius: 5px;
+                    margin-top: 10px;
+                    padding-top: 10px;
+                    font-weight: bold;
+                    color: #213C58;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    subcontrol-position: top left;
+                    padding: 2px 5px;
+                    color: #213C58;
+                }
+                QPushButton {
+                    border: 1px solid #598BBC;
+                    border-radius: 4px;
+                    padding: 5px 10px;
+                    background-color: #edf2f7;
+                    color: #213C58;
+                    font-weight: 600;
+                }
+                QPushButton:hover { background-color: #d6e4f0; border-color: #213C58; }
+                QPushButton:pressed { background-color: #c2d7e8; }
+                QPushButton:disabled { background-color: #f0f0f0; color: #aaa; border-color: #ccc; }
+                QComboBox {
+                    background-color: #f8fafc;
+                    border: 1px solid #598BBC;
+                    border-radius: 4px;
+                    padding: 3px 10px;
+                    color: #213C58;
+                }
+                QComboBox:hover { border-color: #213C58; }
+                QSpinBox, QDoubleSpinBox, QLineEdit {
+                    background-color: #f8fafc;
+                    border: 1px solid #598BBC;
+                    border-radius: 4px;
+                    padding: 3px;
+                    color: #213C58;
+                }
+                QSlider::groove:horizontal { background: #c2d7e8; height: 6px; border-radius: 3px; }
+                QSlider::handle:horizontal { background: #598BBC; width: 14px; margin: -4px 0; border-radius: 7px; }
+                QSlider::groove:vertical { background: #c2d7e8; width: 6px; border-radius: 3px; }
+                QSlider::handle:vertical { background: #598BBC; height: 14px; margin: 0 -4px; border-radius: 7px; }
+                QTabWidget::pane { border: 1px solid #598BBC; background: #ffffff; }
+                QTabBar::tab {
+                    background: #edf2f7;
+                    border: 1px solid #598BBC;
+                    padding: 8px 16px;
+                    color: #213C58;
+                    font-weight: 600;
+                }
+                QTabBar::tab:selected { background: #ffffff; border-bottom-color: #ffffff; color: #213C58; }
+                QTabBar::tab:hover { background: #d6e4f0; }
+                QMessageBox { background-color: #ffffff; color: #1c2833; }
+                QMessageBox QLabel { color: #1c2833; }
+                QDialog { background-color: #ffffff; color: #1c2833; }
+                QScrollArea { border: none; background: transparent; }
             """)
 
         # Regenerate channel colors for the new theme
