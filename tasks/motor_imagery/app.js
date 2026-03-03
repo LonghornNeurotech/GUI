@@ -1,6 +1,7 @@
 // ============================================================
 // Motor Imagery Task – app.js
-// State machine: BLINK → task (LEFT / RIGHT / REST) → BLINK …
+// State machine: REST (blink period) ↔ LEFT / RIGHT
+// REST is the inter-trial interval — subjects blink here ONLY.
 // Sends structured markers via QWebChannel bridge to Python/LSL
 // ============================================================
 
@@ -8,32 +9,28 @@ const canvas = document.getElementById('testCanvas');
 const ctx = canvas.getContext('2d');
 
 // --- State machine -----------------------------------------------------------
-// BLINK  : inter-trial interval – subject may blink (countdown circle)
-// LEFT   : imagine left-hand movement  (L fills up)
-// RIGHT  : imagine right-hand movement (R fills up)
-// REST   : relax, no movement imagery  (O fills up in center)
-let state = "BLINK";
-let previousState = "None";   // for marker bookkeeping
-let cueSide = "";             // current task label when in a task state
+// REST  : inter-trial interval — subject MUST blink here (countdown circle)
+// LEFT  : imagine left-hand movement  (L fills up)
+// RIGHT : imagine right-hand movement (R fills up)
+let state = "REST";
+let previousState = "None";
+let cueSide = "";
 let startTime = 0;
-let rounds = 0;               // completed trials so far
-let totalTrials = 0;          // cycles × 3 (set at start)
+let rounds = 0;               // completed task trials so far
+let totalTrials = 0;          // cycles × 2 (LEFT + RIGHT per cycle)
 let numCycles = 5;            // configurable via welcome screen
-const BLINK_DURATION = 4000;  // 4 s blink window
-const TASK_DURATION  = 4000;  // 4 s task window
 
-// Each cycle contains one LEFT, one RIGHT, one REST in random order.
-// taskQueue holds the full flattened sequence of trials.
+const REST_DURATION = 4000;   // 4 s inter-trial rest / blink window
+const TASK_DURATION = 4000;   // 4 s motor imagery window
+
+// Each cycle contains one LEFT and one RIGHT in random order.
+// taskQueue holds the flattened sequence of task trials only.
 let taskQueue = [];
 let taskIndex = 0;
 
 // --- QWebChannel bridge (set once channel is ready) --------------------------
 let pyBridge = null;
 
-// Initialise QWebChannel as soon as the page loads.
-// When loaded outside QWebEngineView the channel simply won't exist and
-// pyBridge stays null – all marker calls become no-ops, so the page still
-// works standalone for development.
 if (typeof QWebChannel !== 'undefined') {
     new QWebChannel(qt.webChannelTransport, function (channel) {
         pyBridge = channel.objects.pyBridge;
@@ -173,12 +170,14 @@ function shuffle(arr) {
 
 /**
  * Build the full task queue: `numCycles` cycles, each containing
- * ["LEFT", "RIGHT", "REST"] in a random order.
+ * ["LEFT", "RIGHT"] in a random order.
+ * REST periods are handled automatically by the state machine — they are
+ * NOT in the task queue.
  */
 function buildTaskQueue(cycles) {
     const queue = [];
     for (let c = 0; c < cycles; c++) {
-        const cycle = ["LEFT", "RIGHT", "REST"];
+        const cycle = ["LEFT", "RIGHT"];
         shuffle(cycle);
         queue.push(...cycle);
     }
@@ -186,7 +185,7 @@ function buildTaskQueue(cycles) {
 }
 
 function currentDuration() {
-    return state === "BLINK" ? BLINK_DURATION : TASK_DURATION;
+    return state === "REST" ? REST_DURATION : TASK_DURATION;
 }
 
 // --- Test start (recording begins here) --------------------------------------
@@ -207,25 +206,20 @@ function startTest() {
     numCycles = Math.max(1, parseInt(document.getElementById('numCycles').value, 10) || 5);
     taskQueue = buildTaskQueue(numCycles);
     taskIndex = 0;
-    totalTrials = taskQueue.length;  // cycles × 3
+    totalTrials = taskQueue.length;  // cycles × 2
 
-    // Reset state
+    // Reset state — always start with a REST period
     rounds = 0;
     previousState = "None";
-    state = "BLINK";
+    state = "REST";
     cueSide = "";
 
     // Delay task start slightly so Python has time to finish initialising
     // the XDF recorder and LSL outlets before the first marker arrives.
-    // Without this, "None→BLINK" races against start_streams and can be
-    // silently dropped from the XDF file.
     setTimeout(() => {
         startTime = Date.now();
+        sendMarker("None", "REST");
 
-        // First marker: None → BLINK
-        sendMarker("None", "BLINK");
-
-        // Wait for fonts to be ready before drawing on canvas
         document.fonts.ready.then(() => {
             requestAnimationFrame(update);
         });
@@ -241,26 +235,25 @@ function update() {
 
     if (elapsed >= dur) {
         // --- Transition ---
-        if (state === "BLINK") {
-            // Move from BLINK → next task in the queue
+        if (state === "REST") {
+            // REST → next task in the queue
             const nextTask = taskQueue[taskIndex];
             taskIndex++;
             previousState = state;
             state = nextTask;
             cueSide = nextTask;
-            sendMarker("BLINK", nextTask);
+            sendMarker("REST", nextTask);
         } else {
-            // Move from task → BLINK (or end session)
+            // task → REST (or end session)
             rounds++;
             if (rounds >= totalTrials) {
                 sendMarker(state, "None");
-                // Stop LSL streams
                 if (pyBridge) { pyBridge.stop_streams(); }
                 return endSession();
             }
             previousState = state;
-            sendMarker(state, "BLINK");
-            state = "BLINK";
+            sendMarker(state, "REST");
+            state = "REST";
             cueSide = "";
         }
         startTime = Date.now();
@@ -298,58 +291,6 @@ function drawProgressiveLetter(x, y, char, isActive, color, progress) {
     ctx.restore();
 }
 
-function drawProgressiveCircle(cx, cy, radius, isActive, color, progress) {
-    // Draws a circle target that fills from bottom to top (like the letters)
-    ctx.save();
-
-    // Dim outline always visible
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.strokeStyle = "#222";
-    ctx.lineWidth = 3;
-    ctx.stroke();
-
-    if (isActive) {
-        // Clip to a rect that grows upward
-        ctx.save();
-        ctx.beginPath();
-        const fillY = cy + radius - (2 * radius * progress);
-        ctx.rect(cx - radius - 2, fillY, (radius + 2) * 2, radius * 2 + 4);
-        ctx.clip();
-
-        ctx.beginPath();
-        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.shadowBlur = 25;
-        ctx.shadowColor = color;
-        ctx.fill();
-        ctx.restore();
-
-        // Bright outline
-        ctx.beginPath();
-        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 3;
-        ctx.stroke();
-
-        // "REST" label inside circle
-        ctx.fillStyle = "#000";
-        ctx.font = "700 28px 'Space Grotesk'";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("REST", cx, cy);
-    } else {
-        // Dim label
-        ctx.fillStyle = "#222";
-        ctx.font = "700 28px 'Space Grotesk'";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("REST", cx, cy);
-    }
-
-    ctx.restore();
-}
-
 function draw() {
     ctx.fillStyle = "#050505";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -365,8 +306,8 @@ function draw() {
     ctx.moveTo(cx, cy - 20); ctx.lineTo(cx, cy + 20);
     ctx.stroke();
 
-    // ---- BLINK state: countdown circle in center ----
-    if (state === "BLINK") {
+    // ---- REST state: countdown circle draining around crosshair ----
+    if (state === "REST") {
         ctx.beginPath();
         ctx.arc(cx, cy, 35, -Math.PI / 2, (-Math.PI / 2) + (Math.PI * 2 * (1 - progress)));
         ctx.strokeStyle = "rgba(0, 242, 255, 0.4)";
@@ -374,42 +315,29 @@ function draw() {
         ctx.stroke();
     }
 
-    // ---- L / R / REST visuals (always drawn; active when state matches) ----
-    drawProgressiveLetter(
-        cx - 300, cy, "L",
-        state === "LEFT", "#00f2ff", progress
-    );
-    drawProgressiveLetter(
-        cx + 300, cy, "R",
-        state === "RIGHT", "#7000ff", progress
-    );
-    drawProgressiveCircle(
-        cx, cy + 200, 55,
-        state === "REST", "#ffaa00", progress
-    );
+    // ---- L / R visuals (always drawn; active only when state matches) ----
+    drawProgressiveLetter(cx - 300, cy, "L", state === "LEFT",  "#00f2ff", progress);
+    drawProgressiveLetter(cx + 300, cy, "R", state === "RIGHT", "#7000ff", progress);
 
-    // ---- Instruction text at top ----
+    // ---- Instruction text ----
     ctx.textAlign = "center";
     ctx.font = "700 22px 'Space Grotesk'";
-    if (state === "BLINK") {
+    if (state === "REST") {
         ctx.fillStyle = "#00f2ff";
-        ctx.fillText("BLINK NOW / CLEAR MIND", cx, cy - 180);
+        ctx.fillText("BLINK NOW  /  CLEAR MIND", cx, cy - 180);
     } else if (state === "LEFT") {
         ctx.fillStyle = "#00f2ff";
-        ctx.fillText("THINK LEFT MOVEMENT", cx, cy - 180);
+        ctx.fillText("THINK LEFT MOVEMENT  —  DO NOT BLINK", cx, cy - 180);
     } else if (state === "RIGHT") {
         ctx.fillStyle = "#7000ff";
-        ctx.fillText("THINK RIGHT MOVEMENT", cx, cy - 180);
-    } else if (state === "REST") {
-        ctx.fillStyle = "#ffaa00";
-        ctx.fillText("RELAX — NO MOVEMENT", cx, cy - 180);
+        ctx.fillText("THINK RIGHT MOVEMENT  —  DO NOT BLINK", cx, cy - 180);
     }
 
-    // ---- Round counter ----
+    // ---- Trial counter ----
     ctx.fillStyle = "#222";
     ctx.font = "700 22px 'Space Grotesk'";
     ctx.textAlign = "center";
-    const currentCycle = Math.floor(rounds / 3) + 1;
+    const currentCycle = Math.floor(rounds / 2) + 1;
     ctx.fillText(`CYCLE ${currentCycle} / ${numCycles}  —  TRIAL ${rounds + 1} / ${totalTrials}`, cx, canvas.height - 50);
 }
 
