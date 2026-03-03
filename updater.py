@@ -40,15 +40,31 @@ def _parse_build_number(tag: str) -> int | None:
     return None
 
 
-def _asset_name_for_platform() -> str:
-    """Return the release-asset filename appropriate for the running OS."""
+def _find_platform_asset(assets: list[dict]) -> tuple[str | None, str | None]:
+    """Find the release asset for the running OS by keyword matching.
+
+    Returns (asset_filename, download_url) or (None, None) if no match.
+    This is intentionally decoupled from the exact naming convention used
+    by CI so that renaming artefacts never breaks the updater.
+    """
     system = platform.system()
+
+    # (substring the asset name must contain, required extension)
     if system == "Darwin":
-        return "NeuroTechGUI_macOS.zip"
+        matchers = [("macOS", ".zip"), ("Darwin", ".zip"), ("mac", ".zip")]
     elif system == "Windows":
-        return "NeuroTechGUI_Windows.exe"
+        matchers = [("Windows", ".exe"), ("Win", ".exe")]
     else:
-        return "NeuroTechGUI_Linux"
+        matchers = [("Linux", ""), ("linux", "")]
+
+    for asset in assets:
+        name: str = asset.get("name", "")
+        url: str = asset.get("browser_download_url", "")
+        for keyword, ext in matchers:
+            if keyword.lower() in name.lower() and (not ext or name.lower().endswith(ext)):
+                return name, url
+
+    return None, None
 
 
 # ── public API ─────────────────────────────────────────────────────────────────
@@ -79,10 +95,9 @@ def check_for_updates() -> tuple[str | None, str | None]:
     elif latest_tag == CURRENT_VERSION:
         return None, None
 
-    target_asset = _asset_name_for_platform()
-    for asset in data.get("assets", []):
-        if asset.get("name") == target_asset:
-            return latest_tag, asset["browser_download_url"]
+    asset_name, download_url = _find_platform_asset(data.get("assets", []))
+    if asset_name and download_url:
+        return latest_tag, download_url
 
     return None, None
 
@@ -143,19 +158,35 @@ def _apply_update_mac(downloaded_zip: str):
 
     # sys.executable lives at  MyApp.app/Contents/MacOS/myapp
     app_path = Path(sys.executable).parents[2]
-    app_name = app_path.name  # e.g. "NeuroTechGUI_macOS.app"
+    install_dir = str(app_path.parent)   # e.g. /Applications or dist/
     extract_dir = os.path.join(tempfile.gettempdir(), "neurotechgui_extraction")
     updater_sh = os.path.join(tempfile.gettempdir(), "neurotechgui_updater.sh")
 
+    # The .app name inside the zip may differ from the currently-running
+    # bundle (e.g. after a rename in CI), so we discover it dynamically.
     sh = f"""#!/bin/bash
 sleep 2
+rm -rf "{extract_dir}"
 mkdir -p "{extract_dir}"
 unzip -o "{downloaded_zip}" -d "{extract_dir}"
+
+# Find the .app bundle inside the extraction (may be nested one level by ditto)
+NEW_APP=$(find "{extract_dir}" -maxdepth 2 -name '*.app' -type d | head -n 1)
+if [ -z "$NEW_APP" ]; then
+    echo "Error: no .app found in update archive" >&2
+    exit 1
+fi
+
+# Remove old bundle and move new one into place
 rm -rf "{app_path}"
-mv "{extract_dir}/{app_name}" "{app_path}"
+mv "$NEW_APP" "{install_dir}/"
+
+# Determine the installed name for re-launch
+INSTALLED="{install_dir}/$(basename "$NEW_APP")"
+
 rm -rf "{extract_dir}"
 rm "{downloaded_zip}"
-open "{app_path}"
+open "$INSTALLED"
 rm -- "$0"
 """
     with open(updater_sh, "w") as f:
@@ -268,7 +299,14 @@ class UpdateDialog(QDialog):
         self.status_label.setVisible(True)
         self.status_label.setText("Downloading…")
 
-        filename = _asset_name_for_platform()
+        # Use a stable local filename so the updater scripts can find it
+        system = platform.system()
+        if system == "Darwin":
+            filename = "neurotechgui_update.zip"
+        elif system == "Windows":
+            filename = "neurotechgui_update.exe"
+        else:
+            filename = "neurotechgui_update"
         dest = os.path.join(tempfile.gettempdir(), filename)
 
         t = threading.Thread(

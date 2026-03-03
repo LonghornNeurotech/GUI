@@ -43,7 +43,8 @@ jobs:
       - name: Inject build version
         shell: bash
         run: |
-          echo 'CURRENT_VERSION = "build-${{ github.run_number }}"' > version.py
+          sed -i.bak 's/^_INJECTED = .*/_INJECTED = "build-${{ github.run_number }}"/' version.py
+          rm -f version.py.bak
 
       # Set a single APP_NAME env var used by all subsequent steps.
       # Tag stays "build-N" for the version-checker; the human-readable
