@@ -14,6 +14,7 @@ on:
       - '*.jpg'
       - '*.png'
       - '*.woff2'
+      - '*.nsi'
       - 'tasks/**'
       - 'Prosthetic/**'
 
@@ -77,6 +78,34 @@ jobs:
             --name "$APP_NAME" \
             GUI.py
 
+      # ── Windows NSIS Installer ──────────────────────────────────────────
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        run: choco install nsis -y
+
+      - name: Convert icon to ICO
+        if: runner.os == 'Windows'
+        run: |
+          pip install Pillow
+          python -c "from PIL import Image; Image.open('icon.png').save('icon.ico')"
+
+      - name: Build Windows Installer
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # Copy only the Windows exe into a staging folder so the installer
+          # doesn't accidentally bundle Linux/macOS artefacts.
+          mkdir -p installer_dist
+          cp dist/*.exe installer_dist/
+
+          "/c/Program Files (x86)/NSIS/makensis.exe" \
+            -DVERSION=${{ github.run_number }} \
+            -DDIST_PATH=installer_dist \
+            installer.nsi
+
+          mv "LonghornNeuralInterface-Setup-v1.${{ github.run_number }}.exe" dist/
+
+      # ── macOS ──────────────────────────────────────────────────────────
       - name: Build .app Bundle (macOS)
         if: runner.os == 'macOS'
         run: |
