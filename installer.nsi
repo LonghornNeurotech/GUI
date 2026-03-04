@@ -15,7 +15,7 @@
 
 ; ── Application metadata ───────────────────────────────────────────────────
 Name "Longhorn Neural Interface Platform"
-OutFile "LonghornNeuralInterface-Setup-v1.${VERSION}.exe"
+OutFile "LonghornNeuralInterface_Windows_Setup_v1.${VERSION}.exe"
 InstallDir "$PROGRAMFILES\NeuroTechGUI"
 InstallDirRegKey HKLM "Software\NeuroTechGUI" "InstallPath"
 RequestExecutionLevel admin

@@ -55,11 +55,10 @@ jobs:
         run: |
           echo "APP_NAME=LonghornNeuralInterface_${{ runner.os }}_v1.${{ github.run_number }}" >> $GITHUB_ENV
 
-      - name: Build Executable (Windows & Linux)
-        if: runner.os != 'macOS'
+      - name: Build Executable (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
-          SEP=$([[ "${{ runner.os }}" == "Windows" ]] && echo ";" || echo ":")
           pyinstaller --onefile --windowed \
             --collect-all mne --collect-all brainflow --collect-all pylsl \
             --hidden-import=PyQt6.QtOpenGL \
@@ -67,14 +66,36 @@ jobs:
             --hidden-import=PyQt6.sip \
             --hidden-import=Prosthetic.prosthetic_gui \
             --icon "icon.png" \
-            --add-data "tasks/motor_imagery/index.html${SEP}tasks/motor_imagery" \
-            --add-data "tasks/motor_imagery/app.js${SEP}tasks/motor_imagery" \
-            --add-data "tasks/motor_imagery/styles.css${SEP}tasks/motor_imagery" \
-            --add-data "tasks/motor_imagery/SpaceGrotesk.woff2${SEP}tasks/motor_imagery" \
-            --add-data "beach.jpg${SEP}." \
-            --add-data "icon.png${SEP}." \
-            --add-data "banner.png${SEP}." \
-            --add-data "version.py${SEP}." \
+            --add-data "tasks/motor_imagery/index.html:tasks/motor_imagery" \
+            --add-data "tasks/motor_imagery/app.js:tasks/motor_imagery" \
+            --add-data "tasks/motor_imagery/styles.css:tasks/motor_imagery" \
+            --add-data "tasks/motor_imagery/SpaceGrotesk.woff2:tasks/motor_imagery" \
+            --add-data "beach.jpg:." \
+            --add-data "icon.png:." \
+            --add-data "banner.png:." \
+            --add-data "version.py:." \
+            --name "$APP_NAME" \
+            GUI.py
+
+      - name: Build Executable (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          pyinstaller --onefile --windowed \
+            --collect-all mne --collect-all brainflow --collect-all pylsl \
+            --hidden-import=PyQt6.QtOpenGL \
+            --hidden-import=PyQt6.QtOpenGLWidgets \
+            --hidden-import=PyQt6.sip \
+            --hidden-import=Prosthetic.prosthetic_gui \
+            --icon "icon.png" \
+            --add-data "tasks/motor_imagery/index.html;tasks/motor_imagery" \
+            --add-data "tasks/motor_imagery/app.js;tasks/motor_imagery" \
+            --add-data "tasks/motor_imagery/styles.css;tasks/motor_imagery" \
+            --add-data "tasks/motor_imagery/SpaceGrotesk.woff2;tasks/motor_imagery" \
+            --add-data "beach.jpg;." \
+            --add-data "icon.png;." \
+            --add-data "banner.png;." \
+            --add-data "version.py;." \
             --name "$APP_NAME" \
             GUI.py
 
@@ -103,7 +124,9 @@ jobs:
             -DDIST_PATH=installer_dist \
             installer.nsi
 
-          mv "LonghornNeuralInterface-Setup-v1.${{ github.run_number }}.exe" dist/
+          # Remove the standalone exe — only ship the installer
+          rm -f dist/*.exe
+          mv "LonghornNeuralInterface_Windows_Setup_v1.${{ github.run_number }}.exe" dist/
 
       # ── macOS ──────────────────────────────────────────────────────────
       - name: Build .app Bundle (macOS)

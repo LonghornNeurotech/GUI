@@ -638,9 +638,12 @@ class SegmentViewer(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout_container = QHBoxLayout(main_widget)
 
-        # Left panel for controls
+        # Left panel for controls (scrollable so buttons never get compressed)
+        left_panel_scroll = QScrollArea()
+        left_panel_scroll.setWidgetResizable(True)
+        left_panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_panel_scroll.setMaximumWidth(350)
         left_panel = QWidget()
-        left_panel.setMaximumWidth(350)
         left_panel_layout = QVBoxLayout(left_panel)
         left_panel_layout.setContentsMargins(4, 4, 4, 4)
 
@@ -648,20 +651,20 @@ class SegmentViewer(QMainWindow):
         self._banner_menu = QMenu(self)
         self._banner_menu.setStyleSheet("""
             QMenu {
-                background-color: rgba(33, 60, 88, 0.5);
-                border: 1px solid rgba(89, 139, 188, 0.5);
+                background-color: rgba(33, 60, 88, 1.0);
+                border: 1px solid rgba(89, 139, 188, 1.0);
                 border-radius: 6px;
                 padding: 4px 0px;
             }
             QMenu::item {
-                color: rgba(249, 246, 238, 0.5);
+                color: rgba(249, 246, 238, 1.0);
                 padding: 6px 12px;
                 font-size: 12px;
                 font-weight: 600;
             }
             QMenu::item:selected {
-                background: rgba(89, 139, 188, 0.5);
-                color: rgba(255, 255, 255, 0.8);
+                background: rgba(89, 139, 188, 1.0);
+                color: rgba(255, 255, 255, 1.0);
                 border-radius: 4px;
             }
         """)
@@ -915,7 +918,8 @@ class SegmentViewer(QMainWindow):
         left_panel_layout.addWidget(self.signal_group)
 
         left_panel_layout.addStretch()
-        main_layout_container.addWidget(left_panel)
+        left_panel_scroll.setWidget(left_panel)
+        main_layout_container.addWidget(left_panel_scroll)
 
         # Right side: Main content area
         right_panel = QWidget()
