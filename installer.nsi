@@ -51,6 +51,9 @@ VIAddVersionKey "LegalCopyright" "LonghornNeurotech"
 Section "MainProgram" SEC_MAIN
     SetOutPath "$INSTDIR"
 
+    ; Remove old application executables to prevent version conflicts on upgrade
+    Delete "$INSTDIR\LonghornNeuralInterface_*.exe"
+
     ; Copy the PyInstaller executable (and any other dist files)
     File "${DIST_PATH}\*.exe"
 

@@ -46,23 +46,13 @@ def _find_platform_asset(assets: list[dict]) -> tuple[str | None, str | None]:
     Returns (asset_filename, download_url) or (None, None) if no match.
     This is intentionally decoupled from the exact naming convention used
     by CI so that renaming artefacts never breaks the updater.
-
-    On Windows, if an NSIS installer (``-Setup-`` in the name) is available
-    *and* the app was installed via that installer, prefer it.  Otherwise
-    fall back to the standalone ``.exe``.
     """
     system = platform.system()
 
     if system == "Darwin":
         matchers = [("macOS", ".zip"), ("Darwin", ".zip"), ("mac", ".zip")]
     elif system == "Windows":
-        # Prefer the installer when the app was installed via NSIS;
-        # otherwise prefer the standalone exe.
-        if _is_installed_via_installer():
-            matchers = [("Setup", ".exe"), ("Windows", ".exe"), ("Win", ".exe")]
-        else:
-            # Standalone: skip any asset whose name contains "Setup"
-            matchers = [("Windows", ".exe"), ("Win", ".exe")]
+        matchers = [("Setup", ".exe"), ("Windows", ".exe"), ("Win", ".exe")]
     else:
         matchers = [("Linux", ""), ("linux", "")]
 
@@ -71,9 +61,6 @@ def _find_platform_asset(assets: list[dict]) -> tuple[str | None, str | None]:
         url: str = asset.get("browser_download_url", "")
         for keyword, ext in matchers:
             if keyword.lower() in name.lower() and (not ext or name.lower().endswith(ext)):
-                # For standalone mode, skip installer assets
-                if system == "Windows" and not _is_installed_via_installer() and "setup" in name.lower():
-                    continue
                 return name, url
 
     return None, None
@@ -143,64 +130,61 @@ def _download_worker(url: str, dest: str, signals: _DownloadSignals):
 
 # ── platform-specific updaters ────────────────────────────────────────────────
 
-def _is_installed_via_installer() -> bool:
-    """Return True if the app was installed via the NSIS installer (Windows only)."""
+def _get_nsis_install_dir() -> str | None:
+    """Return the NSIS install directory from the registry, or None.
+
+    Checks both the native 64-bit registry view and the WOW64 32-bit view
+    so it works regardless of whether NSIS was 32-bit or 64-bit.
+    """
     if platform.system() != "Windows":
-        return False
+        return None
     try:
         import winreg
-        key = winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SOFTWARE\NeuroTechGUI",
-            0,
-            winreg.KEY_READ,
-        )
-        winreg.QueryValueEx(key, "InstallPath")
-        winreg.CloseKey(key)
-        return True
-    except (FileNotFoundError, PermissionError, OSError):
-        return False
+        for access_flag in (0, winreg.KEY_WOW64_32KEY):
+            try:
+                key = winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\NeuroTechGUI",
+                    0,
+                    winreg.KEY_READ | access_flag,
+                )
+                path, _ = winreg.QueryValueEx(key, "InstallPath")
+                winreg.CloseKey(key)
+                return path
+            except (FileNotFoundError, OSError):
+                continue
+    except Exception:
+        pass
+    return None
 
 
 def _apply_update_windows(downloaded_path: str):
-    """Apply a Windows update, choosing strategy based on install type."""
-    if _is_installed_via_installer():
-        _apply_update_windows_installer(downloaded_path)
-    else:
-        _apply_update_windows_standalone(downloaded_path)
-
-
-def _apply_update_windows_installer(downloaded_path: str):
-    """Run the downloaded NSIS installer silently and exit."""
+    """Run the downloaded NSIS installer silently, then relaunch the app."""
     updater_bat = os.path.join(tempfile.gettempdir(), "neurotechgui_updater.bat")
 
-    bat = f"""@echo off
-timeout /t 2 /nobreak > NUL
-start "" "{downloaded_path}" /S
-del "%~f0"
-"""
-    with open(updater_bat, "w") as f:
-        f.write(bat)
+    install_dir = _get_nsis_install_dir()
+    if not install_dir:
+        install_dir = os.path.join(
+            os.environ.get("PROGRAMFILES", "C:\\Program Files"), "NeuroTechGUI"
+        )
+    install_dir = install_dir.rstrip("\\")
 
-    subprocess.Popen(
-        [updater_bat],
-        creationflags=subprocess.CREATE_NEW_CONSOLE,  # type: ignore[attr-defined]
+    # Run installer synchronously (no `start`), then glob for the new exe
+    # and relaunch it.  The NSIS script deletes old exes before installing,
+    # so only the freshly-installed exe will match the glob.
+    bat = (
+        '@echo off\r\n'
+        'timeout /t 2 /nobreak > NUL\r\n'
+        f'"{downloaded_path}" /S\r\n'
+        'timeout /t 2 /nobreak > NUL\r\n'
+        f'for %%f in ("{install_dir}\\LonghornNeuralInterface_*.exe") do (\r\n'
+        '    start "" "%%f"\r\n'
+        '    goto :done\r\n'
+        ')\r\n'
+        ':done\r\n'
+        'del "%~f0"\r\n'
     )
-    sys.exit(0)
-
-
-def _apply_update_windows_standalone(downloaded_path: str):
-    """Spawn a .bat script that replaces the exe and restarts it."""
-    current_exe = sys.executable
-    updater_bat = os.path.join(tempfile.gettempdir(), "neurotechgui_updater.bat")
-
-    bat = f"""@echo off
-timeout /t 2 /nobreak > NUL
-move /y "{downloaded_path}" "{current_exe}"
-start "" "{current_exe}"
-del "%~f0"
-"""
-    with open(updater_bat, "w") as f:
+    with open(updater_bat, "w", newline="") as f:
         f.write(bat)
 
     subprocess.Popen(
