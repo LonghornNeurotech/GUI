@@ -631,7 +631,7 @@ class SegmentViewer(QMainWindow):
         
         self.setWindowTitle("Longhorn Neural Interface Platform - No File Loaded")
         self.setGeometry(100, 100, 1600, 900)
-        self.setWindowIcon(QIcon(resource_path("icon.png")))
+        self.setWindowIcon(QIcon(resource_path("145164501.png")))
 
         # Main widget and layout
         main_widget = QWidget()
