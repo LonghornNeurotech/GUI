@@ -70,6 +70,8 @@ Section "MainProgram" SEC_MAIN
     ; Find the actual exe inside $INSTDIR (name varies by build number)
     FindFirst $0 $1 "$INSTDIR\LonghornNeuralInterface_*.exe"
     StrCmp $1 "" NoExeFound
+        Delete "$DESKTOP\NeuroTechGUI.lnk"
+        Delete "$SMPROGRAMS\NeuroTechGUI\NeuroTechGUI.lnk"
         CreateShortCut "$SMPROGRAMS\NeuroTechGUI\NeuroTechGUI.lnk" "$INSTDIR\$1"
         CreateShortCut "$DESKTOP\NeuroTechGUI.lnk" "$INSTDIR\$1"
         ; Store the exe name for the updater
