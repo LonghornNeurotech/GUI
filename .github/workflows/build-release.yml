@@ -53,7 +53,7 @@ jobs:
       - name: Set app name
         shell: bash
         run: |
-          echo "APP_NAME=LonghornNeuralInterface_${{ runner.os }}_v1.${{ github.run_number }}" >> $GITHUB_ENV
+          echo "APP_NAME=LonghornNeuralInterface_${{ runner.os }}" >> $GITHUB_ENV
 
       - name: Build Executable (Linux)
         if: runner.os == 'Linux'
@@ -126,7 +126,7 @@ jobs:
 
           # Remove the standalone exe — only ship the installer
           rm -f dist/*.exe
-          mv "LonghornNeuralInterface_Windows_Setup_v1.${{ github.run_number }}.exe" dist/
+          mv "LonghornNeuralInterface_Windows_Setup.exe" dist/
 
       # ── macOS ──────────────────────────────────────────────────────────
       - name: Build .app Bundle (macOS)

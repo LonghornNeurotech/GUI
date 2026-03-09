@@ -98,6 +98,7 @@ from conversions import get_gdf_array, get_pkl_array
 
 # Auto-updater
 from updater import prompt_update_if_available
+from version import CURRENT_VERSION
 
 
 def find_headset_port():
@@ -674,8 +675,12 @@ class SegmentViewer(QMainWindow):
         _github_action = QAction("Visit GitHub", self)
         _github_action.triggered.connect(
             lambda: QDesktopServices.openUrl(QUrl("https://github.com/LonghornNeurotech")))
+        _about_action = QAction("About", self)
+        _about_action.triggered.connect(self._show_about_dialog)
         self._banner_menu.addAction(_website_action)
         self._banner_menu.addAction(_github_action)
+        self._banner_menu.addSeparator()
+        self._banner_menu.addAction(_about_action)
 
         self.banner_btn = QToolButton()
         self.banner_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -2739,6 +2744,20 @@ class SegmentViewer(QMainWindow):
         self._reset_connect_btn()
 
     # ── connection helpers ─────────────────────────────────────────────────────
+
+    def _show_about_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("About")
+        dlg.setMinimumWidth(300)
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel("<b>Longhorn Neural Interface Platform</b>"))
+        layout.addWidget(QLabel(f"Version: {CURRENT_VERSION}"))
+        layout.addWidget(QLabel("© LonghornNeurotech"))
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        btns.accepted.connect(dlg.accept)
+        layout.addWidget(btns)
+        dlg.exec()
 
     def _reset_connect_btn(self):
         """Restore the connect button to its idle state."""
