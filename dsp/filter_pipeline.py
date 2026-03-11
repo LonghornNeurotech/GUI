@@ -1,0 +1,287 @@
+"""
+Causal (streaming) IIR filter pipeline. Do not use sosfiltfilt here — it is non-causal.
+
+This module provides FilterStage and FilterPipeline for real-time EEG/EMG signal
+processing. All filtering uses sosfilt (second-order sections) with persistent
+per-channel zi state vectors so that filter state is maintained across streaming
+chunks without startup transients.
+
+No Qt imports. This module is intentionally standalone and fully headless-testable.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+from scipy.signal import butter, iirnotch, tf2sos, sosfilt, sosfilt_zi
+
+
+class FilterStage:
+    """Single IIR filter stage with per-channel stateful zi vectors.
+
+    Parameters
+    ----------
+    name : str
+        Human-readable label (e.g. "Bandpass 8.0-30.0 Hz").
+    sos : np.ndarray
+        Second-order sections array, shape (n_sections, 6).
+    enabled : bool
+        When False, process() returns data unchanged (zi is not updated).
+    """
+
+    def __init__(self, name: str, sos: np.ndarray, enabled: bool = True) -> None:
+        self.name: str = name
+        self.sos: np.ndarray = sos
+        self.enabled: bool = enabled
+        self._zi: dict[int, np.ndarray] = {}  # channel_idx -> zi array
+
+    def reset_state(self, channel_idx: int | None = None) -> None:
+        """Clear zi state for one channel or all channels.
+
+        Parameters
+        ----------
+        channel_idx : int | None
+            If None, clears all channels. Otherwise clears only that channel.
+        """
+        if channel_idx is None:
+            self._zi.clear()
+        else:
+            self._zi.pop(channel_idx, None)
+
+    def process(self, data: np.ndarray) -> np.ndarray:
+        """Apply filter to data, maintaining zi state across calls.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Shape (n_channels, n_samples), float64.
+
+        Returns
+        -------
+        np.ndarray
+            Same shape as input. Returns input unchanged if ``self.enabled`` is False.
+        """
+        if not self.enabled:
+            return data
+
+        out = data.copy()
+        zi_template = sosfilt_zi(self.sos)  # shape: (n_sections, 2)
+
+        for i in range(data.shape[0]):
+            if i not in self._zi:
+                # Initialize zi scaled to first sample to minimize startup transient
+                self._zi[i] = zi_template * data[i, 0]
+            out[i], self._zi[i] = sosfilt(self.sos, data[i], zi=self._zi[i])
+
+        return out
+
+
+class FilterPipeline:
+    """Ordered chain of FilterStage objects applied sequentially to streaming data.
+
+    Stages are applied in the order they were added. Adding or removing a stage
+    does not reset the zi state of unaffected stages. Reordering (move_stage)
+    resets all zi states because the filter order has changed.
+
+    Example
+    -------
+    >>> pipeline = FilterPipeline()
+    >>> pipeline.add_bandpass(8.0, 30.0, fs=250.0)
+    >>> pipeline.add_notch(60.0, fs=250.0)
+    >>> filtered = pipeline.process_chunk(raw_data)  # shape (n_channels, n_samples)
+    """
+
+    def __init__(self) -> None:
+        self._stages: list[FilterStage] = []
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def stages(self) -> list[FilterStage]:
+        """Read-only view of the ordered stage list."""
+        return list(self._stages)
+
+    def __len__(self) -> int:
+        return len(self._stages)
+
+    # ------------------------------------------------------------------
+    # Stage construction helpers
+    # ------------------------------------------------------------------
+
+    def add_bandpass(
+        self,
+        lowcut: float,
+        highcut: float,
+        fs: float,
+        order: int = 4,
+    ) -> FilterStage:
+        """Design and append a Butterworth bandpass stage.
+
+        Parameters
+        ----------
+        lowcut, highcut : float
+            Passband edges in Hz.
+        fs : float
+            Sample rate in Hz.
+        order : int
+            Filter order (default 4 — two second-order sections, good roll-off).
+
+        Returns
+        -------
+        FilterStage
+            The newly created stage (already appended to pipeline).
+        """
+        sos = butter(order, [lowcut, highcut], btype="band", fs=fs, output="sos")
+        stage = FilterStage(f"Bandpass {lowcut}-{highcut} Hz", sos)
+        self._stages.append(stage)
+        return stage
+
+    def add_notch(
+        self,
+        freq: float,
+        q: float = 30.0,
+        fs: float = 250.0,
+    ) -> FilterStage:
+        """Design and append a notch filter stage.
+
+        iirnotch returns (b, a) coefficients; tf2sos converts to SOS form for
+        numerical stability in the stateful sosfilt path.
+
+        Parameters
+        ----------
+        freq : float
+            Notch center frequency in Hz (commonly 50 or 60).
+        q : float
+            Quality factor — controls notch bandwidth (higher Q = narrower notch).
+        fs : float
+            Sample rate in Hz.
+
+        Returns
+        -------
+        FilterStage
+            The newly created stage (already appended to pipeline).
+        """
+        b, a = iirnotch(freq, q, fs=fs)
+        sos = tf2sos(b, a)
+        stage = FilterStage(f"Notch {freq} Hz", sos)
+        self._stages.append(stage)
+        return stage
+
+    # ------------------------------------------------------------------
+    # Stage management
+    # ------------------------------------------------------------------
+
+    def remove_stage(self, index: int) -> None:
+        """Remove the stage at *index*.
+
+        Does NOT reset zi state of remaining stages — only the removed stage
+        is gone; all other stages retain their filter state.
+        """
+        if 0 <= index < len(self._stages):
+            self._stages.pop(index)
+
+    def move_stage(self, from_idx: int, to_idx: int) -> None:
+        """Move a stage from *from_idx* to *to_idx* and reset ALL zi states.
+
+        Reordering changes which filter sees which input signal, so all
+        existing zi states are stale. A brief transient is acceptable.
+        """
+        if not (0 <= from_idx < len(self._stages)):
+            return
+        stage = self._stages.pop(from_idx)
+        insert_at = max(0, min(to_idx, len(self._stages)))
+        self._stages.insert(insert_at, stage)
+        for s in self._stages:
+            s.reset_state()
+
+    # ------------------------------------------------------------------
+    # Processing
+    # ------------------------------------------------------------------
+
+    def process_chunk(self, data: np.ndarray) -> np.ndarray:
+        """Apply all enabled stages in order.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Shape (n_channels, n_samples).
+
+        Returns
+        -------
+        np.ndarray
+            Filtered data, same shape as input.
+        """
+        for stage in self._stages:
+            data = stage.process(data)
+        return data
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
+    def to_config(self) -> list[dict]:
+        """Serialize pipeline to a JSON-compatible list of dicts.
+
+        Each dict has keys: ``type``, ``enabled``, and type-specific params
+        (``lowcut``/``highcut`` for bandpass; ``freq`` for notch).
+
+        Returns
+        -------
+        list[dict]
+        """
+        result: list[dict] = []
+        for stage in self._stages:
+            if stage.name.startswith("Bandpass"):
+                # Name format: "Bandpass {lowcut}-{highcut} Hz"
+                body = stage.name[len("Bandpass "):].rstrip(" Hz")
+                lo_str, hi_str = body.split("-")
+                result.append(
+                    {
+                        "type": "bandpass",
+                        "lowcut": float(lo_str),
+                        "highcut": float(hi_str),
+                        "enabled": stage.enabled,
+                    }
+                )
+            elif stage.name.startswith("Notch"):
+                # Name format: "Notch {freq} Hz"
+                freq_str = stage.name[len("Notch "):].rstrip(" Hz")
+                result.append(
+                    {
+                        "type": "notch",
+                        "freq": float(freq_str),
+                        "enabled": stage.enabled,
+                    }
+                )
+        return result
+
+    @classmethod
+    def from_config(cls, config: list[dict], fs: float) -> "FilterPipeline":
+        """Restore a FilterPipeline from a serialized config list.
+
+        Parameters
+        ----------
+        config : list[dict]
+            As produced by :meth:`to_config`.
+        fs : float
+            Sample rate in Hz (required to redesign filter coefficients).
+
+        Returns
+        -------
+        FilterPipeline
+        """
+        pipeline = cls()
+        for entry in config:
+            t = entry.get("type", "")
+            if t == "bandpass":
+                stage = pipeline.add_bandpass(
+                    float(entry["lowcut"]),
+                    float(entry["highcut"]),
+                    fs=fs,
+                )
+                stage.enabled = bool(entry.get("enabled", True))
+            elif t == "notch":
+                stage = pipeline.add_notch(float(entry["freq"]), fs=fs)
+                stage.enabled = bool(entry.get("enabled", True))
+        return pipeline
