@@ -64,6 +64,7 @@ class FilterStage:
             return data
 
         out = data.copy()
+        # sosfilt_zi result is constant per SOS array — compute once outside the loop
         zi_template = sosfilt_zi(self.sos)  # shape: (n_sections, 2)
 
         for i in range(data.shape[0]):
@@ -234,8 +235,9 @@ class FilterPipeline:
         for stage in self._stages:
             if stage.name.startswith("Bandpass"):
                 # Name format: "Bandpass {lowcut}-{highcut} Hz"
-                body = stage.name[len("Bandpass "):].rstrip(" Hz")
-                lo_str, hi_str = body.split("-")
+                # Split on spaces: ["Bandpass", "{lowcut}-{highcut}", "Hz"]
+                parts = stage.name.split()
+                lo_str, hi_str = parts[1].split("-")
                 result.append(
                     {
                         "type": "bandpass",
@@ -246,11 +248,12 @@ class FilterPipeline:
                 )
             elif stage.name.startswith("Notch"):
                 # Name format: "Notch {freq} Hz"
-                freq_str = stage.name[len("Notch "):].rstrip(" Hz")
+                # Split on spaces: ["Notch", "{freq}", "Hz"]
+                parts = stage.name.split()
                 result.append(
                     {
                         "type": "notch",
-                        "freq": float(freq_str),
+                        "freq": float(parts[1]),
                         "enabled": stage.enabled,
                     }
                 )
