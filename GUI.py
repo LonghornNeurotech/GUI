@@ -3322,6 +3322,7 @@ class SegmentViewer(QMainWindow):
                 return
             self.xdf_save_dir = chosen_dir
             self._xdf_save_dir_confirmed = True
+            self._load_filter_config()
 
         # Read the live trial number from the spinbox
         self.trial_number = self.trial_spinbox.value()
@@ -3652,6 +3653,7 @@ class SegmentViewer(QMainWindow):
         self.filter_pipeline.move_stage(row, row - 1)
         self._refresh_filter_list_widget()
         self.filter_list_widget.setCurrentRow(row - 1)
+        self._save_filter_config()
 
     def _on_move_down(self):
         """Move the selected filter stage one position down in the pipeline."""
@@ -3661,6 +3663,7 @@ class SegmentViewer(QMainWindow):
         self.filter_pipeline.move_stage(row, row + 1)
         self._refresh_filter_list_widget()
         self.filter_list_widget.setCurrentRow(row + 1)
+        self._save_filter_config()
 
     def _refresh_filter_list_widget(self):
         """Sync the filter list widget with the current pipeline stages."""
@@ -3669,12 +3672,32 @@ class SegmentViewer(QMainWindow):
             self.filter_list_widget.addItem(stage.name)
 
     def _save_filter_config(self):
-        """Persist filter pipeline config (stub — implemented in Plan 03)."""
-        pass
+        """Save current filter pipeline config to session directory."""
+        if not self.xdf_save_dir:
+            return
+        path = os.path.join(self.xdf_save_dir, "filter_config.json")
+        try:
+            with open(path, 'w') as f:
+                json.dump(self.filter_pipeline.to_config(), f, indent=2)
+            print(f"[Filter] Saved {len(self.filter_pipeline)} stage(s) to {path}")
+        except Exception as e:
+            print(f"[Filter] Could not save filter config: {e}")
 
     def _load_filter_config(self):
-        """Restore filter pipeline config (stub — implemented in Plan 03)."""
-        pass
+        """Load filter pipeline config from session directory."""
+        if not self.xdf_save_dir:
+            return
+        path = os.path.join(self.xdf_save_dir, "filter_config.json")
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path) as f:
+                config = json.load(f)
+            self.filter_pipeline = FilterPipeline.from_config(config, self.sampling_rate)
+            self._refresh_filter_list_widget()
+            print(f"[Filter] Restored {len(config)} filter stage(s) from {path}")
+        except Exception as e:
+            print(f"[Filter] Could not load filter config: {e}")
 
     def smooth_display_data(self, data):
         """Apply display smoothing to a channel's rolling buffer.

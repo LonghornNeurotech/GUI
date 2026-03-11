@@ -259,3 +259,34 @@ def test_enabled_toggle():
     out = pipeline.process_chunk(data)
     # Disabled filter should not modify data
     np.testing.assert_array_equal(out, data)
+
+
+def test_config_file_persistence_roundtrip():
+    """FILT-06: Config saved to JSON and restored produces identical pipeline."""
+    import tempfile, json, os
+
+    pipeline = FilterPipeline()
+    pipeline.add_bandpass(1.0, 40.0, fs=250.0)
+    pipeline.add_notch(50.0, fs=250.0)
+    pipeline.add_notch(60.0, fs=250.0)
+
+    config = pipeline.to_config()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "filter_config.json")
+        with open(path, 'w') as f:
+            json.dump(config, f, indent=2)
+        with open(path) as f:
+            loaded = json.load(f)
+
+    restored = FilterPipeline.from_config(loaded, fs=250.0)
+    assert len(restored) == 3
+    assert "Bandpass" in restored.stages[0].name
+    assert "Notch 50" in restored.stages[1].name
+    assert "Notch 60" in restored.stages[2].name
+
+    # Verify restored pipeline produces valid output
+    data = np.random.randn(8, 250)
+    out = restored.process_chunk(data)
+    assert out.shape == data.shape
+    assert not np.any(np.isnan(out))
