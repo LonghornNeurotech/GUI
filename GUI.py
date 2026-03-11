@@ -96,8 +96,12 @@ except ImportError:
 # Import your data loading functions
 from conversions import get_gdf_array, get_pkl_array
 
+# Filter pipeline (DSP core)
+from dsp.filter_pipeline import FilterPipeline
+
 # Auto-updater
-from updater import prompt_update_if_available
+from updater import prompt_update_if_available, check_for_updates, apply_update
+from version import CURRENT_VERSION
 
 
 def find_headset_port():
@@ -593,15 +597,8 @@ class SegmentViewer(QMainWindow):
         self.smoothing_enabled = True
         self.smooth_type = 'Box Filter'  # 'Box Filter' or 'EMA'
 
-        # Pre-calculated filter coefficients (will be computed when sampling rate is known)
-        self.filter_coeffs_valid = False
-        self.bandpass_b = None
-        self.bandpass_a = None
-        self.notch_b = None
-        self.notch_a = None
-        # Persistent filter states per channel for seamless chunk-to-chunk filtering
-        self.bandpass_zi = {}  # channel_idx -> filter state
-        self.notch_zi = {}    # channel_idx -> filter state
+        # Filter pipeline (replaces old lfilter-based filter state)
+        self.filter_pipeline = FilterPipeline()
 
         # Streaming plot item references (reused to avoid memory leak)
         self.streaming_plot_items = {}  # Channel index -> PlotDataItem
@@ -824,8 +821,14 @@ class SegmentViewer(QMainWindow):
             lambda: (setattr(self, '_active_task', "Prosthetic Control"),
                      self.task_launcher_btn.setText("Prosthetic Control"),
                      self.launch_prosthetic()))
+        myo_action = QAction("Myo Armband", self)
+        myo_action.triggered.connect(
+            lambda: (setattr(self, '_active_task', "Myo Armband"),
+                     self.task_launcher_btn.setText("Myo Armband"),
+                     self.launch_myo()))
         self._task_menu.addAction(mi_action)
         self._task_menu.addAction(prosthetic_action)
+        self._task_menu.addAction(myo_action)
 
         self._active_task = "Motor Imagery Task"
         self.task_launcher_btn = QToolButton()
@@ -833,7 +836,7 @@ class SegmentViewer(QMainWindow):
         self.task_launcher_btn.setMenu(self._task_menu)
         self.task_launcher_btn.setText("Motor Imagery Task")
         self.task_launcher_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.task_launcher_btn.setEnabled(False)
+        self.task_launcher_btn.setEnabled(True)
         self.task_launcher_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.task_launcher_btn.setStyleSheet("""
             QToolButton {
@@ -910,6 +913,95 @@ class SegmentViewer(QMainWindow):
         smooth_layout.addWidget(self.smooth_label)
         signal_layout.addLayout(smooth_layout)
 
+        # --- Filter chain sub-panel ---
+        filter_group = QGroupBox("Filters")
+        filter_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                font-size: 11px;
+                color: #213C58;
+                border: 1px solid #598BBC;
+                border-radius: 4px;
+                margin-top: 6px;
+                padding-top: 4px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 4px;
+            }
+        """)
+        filter_group_layout = QVBoxLayout()
+        filter_group_layout.setSpacing(4)
+        filter_group_layout.setContentsMargins(4, 8, 4, 4)
+
+        # List of active filter stages
+        from PyQt6.QtWidgets import QListWidget
+        self.filter_list_widget = QListWidget()
+        self.filter_list_widget.setFixedHeight(100)
+        self.filter_list_widget.setStyleSheet("""
+            QListWidget {
+                background: #ffffff;
+                border: 1px solid #598BBC;
+                border-radius: 3px;
+                font-size: 11px;
+            }
+            QListWidget::item:selected {
+                background: #598BBC;
+                color: white;
+            }
+        """)
+        filter_group_layout.addWidget(self.filter_list_widget)
+
+        # Add / Remove buttons
+        filter_btn_row = QHBoxLayout()
+        filter_btn_row.setSpacing(4)
+        _btn_style = """
+            QPushButton {
+                background: #F9F6EE;
+                color: #213C58;
+                border: 1px solid #598BBC;
+                border-radius: 3px;
+                padding: 3px 6px;
+                font-size: 11px;
+            }
+            QPushButton:hover { background: #e8f0f8; }
+            QPushButton:pressed { background: #d0e0f0; }
+        """
+        _add_bp_btn = QPushButton("Add Bandpass")
+        _add_bp_btn.setStyleSheet(_btn_style)
+        _add_bp_btn.clicked.connect(self._on_add_bandpass)
+        filter_btn_row.addWidget(_add_bp_btn)
+
+        _add_notch_btn = QPushButton("Add Notch")
+        _add_notch_btn.setStyleSheet(_btn_style)
+        _add_notch_btn.clicked.connect(self._on_add_notch)
+        filter_btn_row.addWidget(_add_notch_btn)
+
+        _remove_btn = QPushButton("Remove")
+        _remove_btn.setStyleSheet(_btn_style)
+        _remove_btn.clicked.connect(self._on_remove_filter)
+        filter_btn_row.addWidget(_remove_btn)
+        filter_group_layout.addLayout(filter_btn_row)
+
+        # Reorder buttons
+        filter_reorder_row = QHBoxLayout()
+        filter_reorder_row.setSpacing(4)
+        _up_btn = QPushButton("Up")
+        _up_btn.setStyleSheet(_btn_style)
+        _up_btn.clicked.connect(self._on_move_up)
+        filter_reorder_row.addWidget(_up_btn)
+
+        _down_btn = QPushButton("Down")
+        _down_btn.setStyleSheet(_btn_style)
+        _down_btn.clicked.connect(self._on_move_down)
+        filter_reorder_row.addWidget(_down_btn)
+        filter_reorder_row.addStretch()
+        filter_group_layout.addLayout(filter_reorder_row)
+
+        filter_group.setLayout(filter_group_layout)
+        signal_layout.addWidget(filter_group)
+
         self.signal_group.setLayout(signal_layout)
         self.signal_group.setEnabled(False)
         left_panel_layout.addWidget(self.signal_group)
@@ -920,8 +1012,42 @@ class SegmentViewer(QMainWindow):
         # Right side: Main content area
         right_panel = QWidget()
         self.main_layout = QVBoxLayout(right_panel)
+        self.main_layout.setContentsMargins(4, 4, 4, 4)
         main_layout_container.addWidget(right_panel, stretch=1)
-        
+
+        # ── Top-right header: version + update button ─────────────────────────
+        _header_row = QHBoxLayout()
+        _header_row.setContentsMargins(0, 0, 4, 0)
+        _header_row.addStretch()
+
+        _ver_display = f"v1.{CURRENT_VERSION.split('-')[1]}" if CURRENT_VERSION.startswith("build-") else CURRENT_VERSION
+        self._version_label = QLabel(f"Longhorn Neural Interface Platform  {_ver_display}")
+        self._version_label.setStyleSheet("color: #888; font-size: 11px;")
+        _header_row.addWidget(self._version_label)
+
+        self._update_btn = QPushButton("Update Available")
+        self._update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFEBAD;
+                color: #BF5801;
+                font-weight: bold;
+                font-size: 11px;
+                border: 1px solid #BF5801;
+                border-radius: 4px;
+                padding: 3px 10px;
+            }
+            QPushButton:hover { background-color: #ffe08a; }
+            QPushButton:pressed { background-color: #ffd166; }
+        """)
+        self._update_btn.clicked.connect(self._on_update_btn_clicked)
+        self._update_btn.setVisible(False)
+        self._pending_update_url: str | None = None
+        self._pending_update_tag: str | None = None
+        _header_row.addWidget(self._update_btn)
+
+        self.main_layout.addLayout(_header_row)
+
         # Channel selection dropdown (initially disabled but visible)
         self.channel_group = QGroupBox("Channel Selection")
         channel_layout = QHBoxLayout()
@@ -2848,6 +2974,14 @@ class SegmentViewer(QMainWindow):
 
         self.calculate_filter_coefficients()
 
+        # Build default filter pipeline stages if pipeline is empty
+        if len(self.filter_pipeline) == 0:
+            self.filter_pipeline.add_bandpass(self.lowcut, self.highcut, self.sampling_rate)
+            self.filter_pipeline.add_notch(self.notch_freq, fs=self.sampling_rate)
+            self._refresh_filter_list_widget()
+            print(f"[Filter] Default pipeline: bandpass {self.lowcut}-{self.highcut} Hz + notch {self.notch_freq} Hz @ {self.sampling_rate} Hz")
+        self._load_filter_config()
+
         self.sampling_rate_spinbox.blockSignals(True)
         self.sampling_rate_spinbox.setValue(self.sampling_rate)
         self.sampling_rate_spinbox.blockSignals(False)
@@ -2937,7 +3071,6 @@ class SegmentViewer(QMainWindow):
             self.start_recording_btn.setEnabled(False)
             self.start_recording_btn.setText("Start Recording")
             self.start_recording_btn.setStyleSheet("")
-            self.task_launcher_btn.setEnabled(False)
 
             self.eeg_stream_status.setText("EEG Stream: Inactive")
             self.eeg_stream_status.setStyleSheet("color: gray;")
@@ -3227,8 +3360,8 @@ class SegmentViewer(QMainWindow):
             self.smoothed_band_power.clear()
             self.band_power_y_max = 0.0
             # Reset filter states for fresh start
-            self.bandpass_zi.clear()
-            self.notch_zi.clear()
+            for stage in self.filter_pipeline.stages:
+                stage.reset_state()
             # Fill buffer with NaN so unfilled regions aren't drawn
             # (avoids zero-to-data boundary that causes filter transient spikes)
             if self.stream_buffer is not None:
@@ -3415,62 +3548,133 @@ class SegmentViewer(QMainWindow):
                 ))
 
     def calculate_filter_coefficients(self):
-        """Pre-calculate filter coefficients for efficient signal processing"""
-        if not SCIPY_AVAILABLE:
-            self.filter_coeffs_valid = False
-            return
+        """Deprecated: filter coefficients now managed by FilterPipeline.
 
-        try:
-            # Bandpass filter coefficients (5-35 Hz)
-            self.bandpass_b, self.bandpass_a = butter(
-                2, [self.lowcut, self.highcut], btype='band', fs=self.sampling_rate
-            )
-            # Notch filter coefficients (60 Hz)
-            self.notch_b, self.notch_a = iirnotch(self.notch_freq, 30, fs=self.sampling_rate)
-            # Compute initial filter state templates for stateful filtering
-            self.bandpass_zi_template = lfilter_zi(self.bandpass_b, self.bandpass_a)
-            self.notch_zi_template = lfilter_zi(self.notch_b, self.notch_a)
-            # Reset per-channel states so they get re-initialized on next data
-            self.bandpass_zi.clear()
-            self.notch_zi.clear()
-            self.filter_coeffs_valid = True
-        except Exception as e:
-            print(f"Error calculating filter coefficients: {e}")
-            self.filter_coeffs_valid = False
+        Kept as a no-op so call-sites in _complete_connection do not need
+        to be removed during this transition phase. The FilterPipeline
+        (self.filter_pipeline) is the sole filter engine.
+        """
+        # No-op: FilterPipeline handles all coefficient computation and zi state.
+        pass
 
     def process_signal(self, data):
-        """Apply signal processing to raw data using stateful filters for seamless streaming"""
-        processed = np.zeros_like(data)
+        """Apply filter pipeline to raw multi-channel chunk."""
+        if len(self.filter_pipeline) > 0:
+            data = self.filter_pipeline.process_chunk(data)
 
-        for i in range(data.shape[0]):
-            channel_data = data[i, :].copy()
-
-            # Use pre-calculated filter coefficients with persistent state
-            if SCIPY_AVAILABLE and self.filter_coeffs_valid:
-                try:
-                    # Initialize filter states for this channel if needed
-                    if i not in self.bandpass_zi:
-                        self.bandpass_zi[i] = self.bandpass_zi_template * channel_data[0]
-                    if i not in self.notch_zi:
-                        self.notch_zi[i] = self.notch_zi_template * channel_data[0]
-
-                    # Bandpass filter with persistent state
-                    channel_data, self.bandpass_zi[i] = lfilter(
-                        self.bandpass_b, self.bandpass_a, channel_data, zi=self.bandpass_zi[i]
-                    )
-                    # Notch filter with persistent state
-                    channel_data, self.notch_zi[i] = lfilter(
-                        self.notch_b, self.notch_a, channel_data, zi=self.notch_zi[i]
-                    )
-                except:
-                    pass  # Skip if not enough data
-
-            # Apply magnitude scaling
-            channel_data = channel_data * (self.magnitude_scale / 100.0)
-
-            processed[i, :] = channel_data
-
+        # Apply magnitude scaling (unchanged)
+        processed = data * (self.magnitude_scale / 100.0)
         return processed
+
+    # ------------------------------------------------------------------
+    # Filter UI slot methods
+    # ------------------------------------------------------------------
+
+    def _on_add_bandpass(self):
+        """Open dialog to add a bandpass filter stage to the pipeline."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Add Bandpass Filter")
+        dlg.setMinimumWidth(280)
+        layout = QFormLayout(dlg)
+
+        lo_spin = QDoubleSpinBox()
+        lo_spin.setRange(0.1, 500.0)
+        lo_spin.setValue(1.0)
+        lo_spin.setSuffix(" Hz")
+        lo_spin.setDecimals(1)
+        layout.addRow("Low cutoff:", lo_spin)
+
+        hi_spin = QDoubleSpinBox()
+        hi_spin.setRange(0.1, 500.0)
+        hi_spin.setValue(40.0)
+        hi_spin.setSuffix(" Hz")
+        hi_spin.setDecimals(1)
+        layout.addRow("High cutoff:", hi_spin)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addRow(btns)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            lo = lo_spin.value()
+            hi = hi_spin.value()
+            fs = getattr(self, 'sampling_rate', 250)
+            self.filter_pipeline.add_bandpass(lo, hi, fs)
+            print(f"[Filter] Added bandpass {lo}-{hi} Hz @ {fs} Hz")
+            self._refresh_filter_list_widget()
+            self._save_filter_config()
+
+    def _on_add_notch(self):
+        """Open dialog to add a notch filter stage to the pipeline."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Add Notch Filter")
+        dlg.setMinimumWidth(240)
+        layout = QFormLayout(dlg)
+
+        freq_combo = QComboBox()
+        freq_combo.addItems(["50 Hz", "60 Hz"])
+        freq_combo.setCurrentText("60 Hz")
+        layout.addRow("Notch frequency:", freq_combo)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addRow(btns)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            freq = 50.0 if freq_combo.currentText().startswith("50") else 60.0
+            fs = getattr(self, 'sampling_rate', 250)
+            self.filter_pipeline.add_notch(freq, fs=fs)
+            print(f"[Filter] Added notch {freq} Hz @ {fs} Hz")
+            self._refresh_filter_list_widget()
+            self._save_filter_config()
+
+    def _on_remove_filter(self):
+        """Remove the currently selected filter stage from the pipeline."""
+        row = self.filter_list_widget.currentRow()
+        if row < 0:
+            return
+        self.filter_pipeline.remove_stage(row)
+        print(f"[Filter] Removed stage at index {row}")
+        self._refresh_filter_list_widget()
+        self._save_filter_config()
+
+    def _on_move_up(self):
+        """Move the selected filter stage one position up in the pipeline."""
+        row = self.filter_list_widget.currentRow()
+        if row <= 0:
+            return
+        self.filter_pipeline.move_stage(row, row - 1)
+        self._refresh_filter_list_widget()
+        self.filter_list_widget.setCurrentRow(row - 1)
+
+    def _on_move_down(self):
+        """Move the selected filter stage one position down in the pipeline."""
+        row = self.filter_list_widget.currentRow()
+        if row < 0 or row >= len(self.filter_pipeline) - 1:
+            return
+        self.filter_pipeline.move_stage(row, row + 1)
+        self._refresh_filter_list_widget()
+        self.filter_list_widget.setCurrentRow(row + 1)
+
+    def _refresh_filter_list_widget(self):
+        """Sync the filter list widget with the current pipeline stages."""
+        self.filter_list_widget.clear()
+        for stage in self.filter_pipeline.stages:
+            self.filter_list_widget.addItem(stage.name)
+
+    def _save_filter_config(self):
+        """Persist filter pipeline config (stub — implemented in Plan 03)."""
+        pass
+
+    def _load_filter_config(self):
+        """Restore filter pipeline config (stub — implemented in Plan 03)."""
+        pass
 
     def smooth_display_data(self, data):
         """Apply display smoothing to a channel's rolling buffer.
@@ -3818,6 +4022,20 @@ class SegmentViewer(QMainWindow):
         win = ProstheticWindow(board, board_id, parent=self)
         win.exec()
 
+    def launch_myo(self):
+        """Launch the Myo Armband EMG & Gesture window."""
+        try:
+            from Myo.myo_window import MyoWindow
+        except ImportError as e:
+            QMessageBox.critical(self, "Import Error",
+                f"Could not load Myo module:\n{e}")
+            return
+        if not hasattr(self, '_myo_window') or self._myo_window is None:
+            self._myo_window = MyoWindow()
+        self._myo_window.show()
+        self._myo_window.raise_()
+        self._myo_window.activateWindow()
+
     def on_magnitude_changed(self, text):
         """Handle magnitude scale change"""
         try:
@@ -3889,6 +4107,51 @@ class SegmentViewer(QMainWindow):
                 self.selected_channels_label.setText(f"Selected: {channels_str}")
             else:
                 self.selected_channels_label.setText(f"{len(selected_list)} channels selected")
+
+    # ── Update checker ────────────────────────────────────────────────────────
+
+    def start_update_check(self):
+        """Run update check in a background thread; reveal button if newer build found."""
+        import threading
+        def _worker():
+            try:
+                latest_tag, url = check_for_updates()
+            except Exception:
+                latest_tag, url = None, None
+            # Marshal back to Qt main thread via a single-shot timer
+            QTimer.singleShot(0, lambda: self._on_update_result(latest_tag, url))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @staticmethod
+    def _fmt_version(tag: str) -> str:
+        """Convert 'build-29' → 'v1.29', pass anything else through."""
+        if tag and tag.startswith("build-"):
+            return f"v1.{tag.split('-', 1)[1]}"
+        return tag
+
+    def _on_update_result(self, latest_tag, url):
+        if latest_tag and url:
+            self._pending_update_tag = latest_tag
+            self._pending_update_url = url
+            self._update_btn.setText(f"Update Available  {self._fmt_version(latest_tag)}")
+            self._update_btn.setVisible(True)
+        else:
+            self._update_btn.setVisible(False)
+
+    def _on_update_btn_clicked(self):
+        tag = self._fmt_version(self._pending_update_tag) if self._pending_update_tag else "the latest version"
+        url = self._pending_update_url
+        reply = QMessageBox.question(
+            self,
+            "Update Available",
+            f"Would you like to update to {tag}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes and url:
+            apply_update(url)
+
+    # ── Theme ─────────────────────────────────────────────────────────────────
 
     def apply_theme(self):
         """Apply the selected theme to the application"""
@@ -4235,14 +4498,14 @@ def main():
     if app is None:
         app = QApplication(sys.argv)
 
-    # Check for updates before showing the main window.
-    # If an update is applied the process will exit inside prompt_update_if_available.
-    prompt_update_if_available()
-
     viewer = SegmentViewer()
     viewer.showMaximized()    # open full-screen (keeps system taskbar)
     viewer.activateWindow()   # bring to front on Windows
     viewer.raise_()           # raise above other windows
+
+    # Non-blocking update check: runs in background, reveals button if newer build found
+    QTimer.singleShot(1500, viewer.start_update_check)
+
     sys.exit(app.exec())
 
 
