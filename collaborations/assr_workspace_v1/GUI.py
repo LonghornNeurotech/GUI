@@ -1,0 +1,4321 @@
+"""
+Minimal EEG Segment Viewer
+Displays segmented EEG data with channel selection and window navigation
+"""
+
+import sys
+import os
+
+# Must be set before any Qt/Chromium objects are created.
+# Tells V8 to skip JIT compilation, avoiding the large CodeRange virtual-memory
+# reservation that fails inside PyInstaller / hardened-runtime builds.
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--js-flags=--jitless")
+
+import numpy as np
+import pyqtgraph as pg
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QCheckBox, QSlider, QSpinBox, QPushButton, QLabel, QGroupBox,
+    QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QRadioButton, QButtonGroup,
+    QFileDialog, QMessageBox, QComboBox, QLineEdit, QTabWidget, QMenu, QWidgetAction, QScrollArea,
+    QInputDialog, QToolButton, QSizePolicy, QProgressBar, QGridLayout
+)
+from PyQt6.QtCore import Qt, QTimer, QSize
+from PyQt6.QtGui import QPalette, QColor, QKeySequence, QShortcut, QAction, QIcon, QPixmap, QDesktopServices
+import platform
+import time
+import struct
+import json
+from datetime import datetime
+from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebChannel import QWebChannel
+from PyQt6.QtCore import QUrl, pyqtSlot, QObject
+
+
+def resource_path(relative_path):
+    """Get the absolute path to a bundled resource (works for dev and PyInstaller)."""
+    base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+
+# Serial port imports
+try:
+    import serial.tools.list_ports
+    SERIAL_AVAILABLE = True
+except ImportError:
+    SERIAL_AVAILABLE = False
+    print("Warning: pyserial not available. Install with: pip install pyserial")
+
+# Signal processing imports
+try:
+    from scipy.signal import butter, lfilter, lfilter_zi, iirnotch
+    from scipy.ndimage import uniform_filter1d
+    from scipy import signal as sp_signal
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    print("Warning: scipy not available. Install with: pip install scipy")
+
+# LSL imports
+try:
+    from pylsl import (StreamInfo, StreamOutlet, StreamInlet, resolve_byprop,
+                       local_clock, cf_float32, cf_string)
+    LSL_AVAILABLE = True
+except ImportError:
+    LSL_AVAILABLE = False
+    # Define dummy values if import fails
+    StreamInfo = None
+    StreamOutlet = None
+    StreamInlet = None
+    resolve_byprop = None
+    local_clock = None
+    cf_float32 = None
+    cf_string = None
+    print("Warning: pylsl not available. Install with: pip install pylsl")
+
+# BrainFlow imports
+try:
+    from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
+    BRAINFLOW_AVAILABLE = True
+except ImportError as e:
+    BRAINFLOW_AVAILABLE = False
+    BoardShim = None
+    BrainFlowInputParams = None
+    BoardIds = None
+    print(f"Warning: BrainFlow not available. Install with: pip install brainflow")
+    print(f"Import error details: {e}")
+
+# XDF file support
+try:
+    import pyxdf
+    PYXDF_AVAILABLE = True
+except ImportError:
+    PYXDF_AVAILABLE = False
+    print("Warning: pyxdf not available. Install with: pip install pyxdf")
+
+# Import your data loading functions
+from conversions import get_gdf_array, get_pkl_array
+
+# Auto-updater
+from updater import prompt_update_if_available
+from version import CURRENT_VERSION
+
+
+def find_headset_port():
+    """
+    Automatically search for headset on typical COM ports (COM3, COM4) and others.
+    Returns the port name if found, None otherwise.
+    """
+    if not SERIAL_AVAILABLE:
+        print("Warning: pyserial not available for port scanning")
+        return None
+
+    system = platform.system()
+    ports = list(serial.tools.list_ports.comports())
+    print(f"Scanning available ports: {[p.device for p in ports]}")
+
+    # Priority ports for Windows
+    priority_ports = ['COM3', 'COM4']
+
+    # Check priority ports first
+    for port_name in priority_ports:
+        for port in ports:
+            if port.device == port_name:
+                if 'CH340' in port.description or 'USB' in port.description or 'Serial' in port.description:
+                    print(f"Found headset on priority port: {port.device}")
+                    return port.device
+
+    # Check all other ports
+    for port in ports:
+        if port.device not in priority_ports:
+            if 'CH340' in port.description or 'USB' in port.description:
+                print(f"Found potential headset: {port.device}")
+                if system == "Darwin":  # macOS
+                    if any(identifier in port.device.lower() for identifier in ["usbserial", "cu.usbmodem", "tty.usbserial"]):
+                        return port.device
+                elif system == "Windows":
+                    if "com" in port.device.lower():
+                        return port.device
+                elif system == "Linux":
+                    if "ttyUSB" in port.device or "ttyACM" in port.device:
+                        return port.device
+
+    print("No headset detected on any port.")
+    return None
+
+
+class SettingsDialog(QDialog):
+    """Dialog for configuring application settings"""
+    def __init__(self, current_mode, current_theme, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(400)
+
+        layout = QVBoxLayout()
+
+        # Theme selection
+        theme_group = QGroupBox("Theme")
+        theme_layout = QVBoxLayout()
+
+        self.theme_button_group = QButtonGroup()
+
+        self.light_theme_radio = QRadioButton("Light Mode")
+        self.dark_theme_radio = QRadioButton("Dark Mode")
+
+        self.theme_button_group.addButton(self.light_theme_radio)
+        self.theme_button_group.addButton(self.dark_theme_radio)
+
+        if current_theme == 'light':
+            self.light_theme_radio.setChecked(True)
+        else:
+            self.dark_theme_radio.setChecked(True)
+
+        theme_layout.addWidget(self.light_theme_radio)
+        theme_layout.addWidget(self.dark_theme_radio)
+        theme_group.setLayout(theme_layout)
+        layout.addWidget(theme_group)
+
+        # Dialog buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.setLayout(layout)
+
+    def get_mode(self):
+        """Return selected display mode"""
+        return 'stacked'
+
+    def get_theme(self):
+        """Return selected theme"""
+        return 'light' if self.light_theme_radio.isChecked() else 'dark'
+
+class TaskWebBridge(QObject):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+
+    # The @pyqtSlot decorator exposes this function to JavaScript
+    @pyqtSlot(str)
+    def send_marker(self, marker_val):
+        """Receive a structured marker string from the web UI and push it via LSL.
+
+        The JS side sends JSON like: {"stop": "BLINK", "start": "LEFT"}
+        """
+        print(f"[Marker] {marker_val}")
+        ts = time.time()
+
+        # Send marker via LSL if the stream is active
+        if self.main_window.marker_outlet is not None and LSL_AVAILABLE:
+            self.main_window.marker_outlet.push_sample([marker_val])
+
+        # Push directly to XDF recorder.
+        # If the recorder isn't ready yet (start_streams race), buffer the marker
+        # and flush it as soon as recording begins.
+        if self.main_window.xdf_recorder is not None:
+            self.main_window.xdf_recorder.push_marker(ts, marker_val)
+        else:
+            self.main_window._pending_markers.append((ts, marker_val))
+
+    @pyqtSlot()
+    def pick_save_dir(self):
+        """Open a native folder picker and send the chosen path back to JS."""
+        mw = self.main_window
+        chosen = QFileDialog.getExistingDirectory(
+            mw, "Choose XDF Save Folder", mw.xdf_save_dir
+        )
+        if chosen:
+            mw.xdf_save_dir = chosen
+            mw._xdf_save_dir_confirmed = True
+            mw.web_view.page().runJavaScript(f"setSaveDir({json.dumps(chosen)})")
+
+    @pyqtSlot(str, str)
+    def start_streams(self, patient_id, save_dir):
+        """Called from JS when the recording task begins.
+
+        Automatically creates EEG and Marker LSL outlets using the
+        patient_id entered in the web form, so the user doesn't have
+        to start them manually from the streaming panel.
+        """
+        mw = self.main_window
+        patient_id = patient_id.strip()
+        if not patient_id:
+            patient_id = "UNKNOWN"
+
+        # Update save directory from the task UI form
+        save_dir = save_dir.strip()
+        if save_dir:
+            mw.xdf_save_dir = os.path.abspath(os.path.expanduser(save_dir))
+
+        mw.patient_id = patient_id
+        mw.trial_number = mw.trial_spinbox.value()
+
+        # Allow marker/audio task simulation without an active EEG headset.
+        if mw.num_channels <= 0:
+            mw.num_channels = 1
+            mw.channel_names = ["Sim_NoHeadset"]
+            if not mw.sampling_rate or mw.sampling_rate <= 0:
+                mw.sampling_rate = 250
+            print("[Task] No headset connected; using simulation channel metadata.")
+
+        # --- EEG outlet ---
+        if mw.eeg_outlet is None and LSL_AVAILABLE and mw.board is not None:
+            try:
+                stream_name = f"EEG_{patient_id}_Trial{mw.trial_number:04d}"
+                info = StreamInfo(
+                    name=stream_name,
+                    type='EEG',
+                    channel_count=mw.num_channels,
+                    nominal_srate=mw.sampling_rate,
+                    channel_format=cf_float32,
+                    source_id=f'eeg_headset_{patient_id}'
+                )
+                mw.eeg_outlet = StreamOutlet(info)
+                mw.eeg_stream_status.setText(f"EEG Stream: Active - {stream_name}")
+                mw.eeg_stream_status.setStyleSheet("color: green; font-weight: bold;")
+                mw.start_eeg_stream_btn.setText("Stop EEG Stream")
+                mw.start_eeg_stream_btn.clicked.disconnect()
+                mw.start_eeg_stream_btn.clicked.connect(mw.stop_eeg_stream)
+                print(f"LSL EEG Stream auto-started: {stream_name}")
+            except Exception as e:
+                print(f"Failed to auto-start EEG stream: {e}")
+
+        # --- Marker outlet ---
+        if mw.marker_outlet is None and LSL_AVAILABLE:
+            try:
+                stream_name = f"Markers_{patient_id}_Trial{mw.trial_number:04d}"
+                info = StreamInfo(
+                    name=stream_name,
+                    type='Markers',
+                    channel_count=1,
+                    nominal_srate=0,
+                    channel_format=cf_string,
+                    source_id=f'markers_{patient_id}'
+                )
+                mw.marker_outlet = StreamOutlet(info)
+                mw.marker_stream_status.setText(f"Marker Stream: Active - {stream_name}")
+                mw.marker_stream_status.setStyleSheet("color: green; font-weight: bold;")
+                mw.start_marker_stream_btn.setText("Stop Marker Stream")
+                mw.start_marker_stream_btn.clicked.disconnect()
+                mw.start_marker_stream_btn.clicked.connect(mw.stop_marker_stream)
+                print(f"LSL Marker Stream auto-started: {stream_name}")
+            except Exception as e:
+                print(f"Failed to auto-start Marker stream: {e}")
+
+        # If a manual recording is already running, stop it first so the task
+        # gets its own clean file (this also resets the Start Recording button).
+        if mw.xdf_recorder is not None:
+            print("[XDF] Stopping existing recording before starting task recording.")
+            mw.stop_xdf_recording()
+
+        # Start XDF recording now that both outlets are live
+        mw.start_xdf_recording(patient_id)
+
+    @pyqtSlot()
+    def stop_streams(self):
+        """Called from JS when the recording session ends."""
+        mw = self.main_window
+        mw.stop_xdf_recording()
+        mw.stop_eeg_stream()
+        mw.stop_marker_stream()
+        # Auto-advance trial number so the next run gets a fresh file
+        mw.trial_spinbox.setValue(mw.trial_spinbox.value() + 1)
+        print("LSL streams stopped by task UI")
+
+class XDFRecorder:
+    """Records EEG and Marker streams to an XDF 1.0 file.
+
+    Data is pushed directly via push_eeg() / push_marker() — no LSL inlet
+    round-trip required.  Call start() to initialise buffers; call stop() to
+    flush everything to disk.
+    """
+
+    def __init__(self, filepath, eeg_stream_name, marker_stream_name,
+                 num_channels, srate, channel_names=None):
+        self.filepath = filepath
+        self.eeg_stream_name = eeg_stream_name
+        self.marker_stream_name = marker_stream_name
+        self.num_channels = num_channels
+        self.srate = srate
+        self.channel_names = channel_names or [f"Ch{i + 1}" for i in range(num_channels)]
+        self._recording = False
+        self._eeg_samples = []    # [(timestamp: float, values: list[float])]
+        self._marker_samples = [] # [(timestamp: float, text: str)]
+
+    def start(self):
+        self._recording = True
+        self._eeg_samples = []
+        self._marker_samples = []
+        print(f"[XDF] Recording started → {self.filepath}")
+
+    def stop(self):
+        self._recording = False
+        self._write_xdf()
+
+    def push_eeg(self, timestamps, samples):
+        """Append a batch of EEG samples.
+
+        timestamps : list of float (Unix seconds, one per sample)
+        samples    : list of list[float], shape (n_samples, n_channels)
+        """
+        if not self._recording:
+            return
+        for ts, row in zip(timestamps, samples):
+            self._eeg_samples.append((ts, row))
+
+    def push_marker(self, timestamp, text):
+        """Append a single marker event."""
+        if not self._recording:
+            return
+        self._marker_samples.append((timestamp, text))
+
+    # ------------------------------------------------------------------ XDF helpers
+
+    @staticmethod
+    def _encode_varlen(value):
+        """Encode an integer as a variable-length XDF length field."""
+        if value <= 0xFF:
+            return struct.pack('<BB', 1, value)
+        elif value <= 0xFFFFFFFF:
+            return struct.pack('<B', 4) + struct.pack('<I', value)
+        else:
+            return struct.pack('<B', 8) + struct.pack('<Q', value)
+
+    @staticmethod
+    def _write_chunk(f, tag, content):
+        """Write one XDF chunk: [NumLengthBytes][Length][Tag(2)][Content]."""
+        if isinstance(content, str):
+            content = content.encode('utf-8')
+        payload_len = 2 + len(content)
+        f.write(XDFRecorder._encode_varlen(payload_len))
+        f.write(struct.pack('<H', tag))
+        f.write(content)
+
+    def _write_xdf(self):
+        eeg_samples = list(self._eeg_samples)
+        marker_samples = list(self._marker_samples)
+
+        print(f"[XDF] Writing {len(eeg_samples)} EEG samples, "
+              f"{len(marker_samples)} markers → {self.filepath}")
+
+        os.makedirs(os.path.dirname(os.path.abspath(self.filepath)), exist_ok=True)
+
+        with open(self.filepath, 'wb') as f:
+            # Magic bytes
+            f.write(b'XDF:')
+
+            # FileHeader  (tag 1)
+            self._write_chunk(f, 1,
+                '<?xml version="1.0"?><info><version>1.0</version></info>')
+
+            # EEG StreamHeader  (tag 2, stream_id = 1)
+            ch_xml = ''.join(
+                f'<channel><label>{name}</label>'
+                f'<type>EEG</type><unit>microvolts</unit></channel>'
+                for name in self.channel_names[:self.num_channels]
+            )
+            eeg_hdr = (
+                f'<?xml version="1.0"?><info>'
+                f'<name>{self.eeg_stream_name}</name>'
+                f'<type>EEG</type>'
+                f'<channel_count>{self.num_channels}</channel_count>'
+                f'<nominal_srate>{self.srate}</nominal_srate>'
+                f'<channel_format>float32</channel_format>'
+                f'<channels>{ch_xml}</channels>'
+                f'</info>'
+            )
+            self._write_chunk(f, 2, struct.pack('<I', 1) + eeg_hdr.encode('utf-8'))
+
+            # Marker StreamHeader  (tag 2, stream_id = 2)
+            mk_hdr = (
+                '<?xml version="1.0"?><info>'
+                f'<name>{self.marker_stream_name}</name>'
+                '<type>Markers</type>'
+                '<channel_count>1</channel_count>'
+                '<nominal_srate>0</nominal_srate>'
+                '<channel_format>string</channel_format>'
+                '</info>'
+            )
+            self._write_chunk(f, 2, struct.pack('<I', 2) + mk_hdr.encode('utf-8'))
+
+            # EEG Samples chunk  (tag 3, stream_id = 1)
+            if eeg_samples:
+                buf = bytearray()
+                buf += struct.pack('<I', 1)
+                buf += self._encode_varlen(len(eeg_samples))
+                for ts, values in eeg_samples:
+                    buf += struct.pack('<Bd', 8, ts)
+                    vals = (list(values) + [0.0] * self.num_channels)[:self.num_channels]
+                    buf += struct.pack(f'<{self.num_channels}f', *vals)
+                self._write_chunk(f, 3, bytes(buf))
+
+            # Marker Samples chunk  (tag 3, stream_id = 2)
+            # XDF string channels use the same varlen scheme for the per-value
+            # length prefix (indicator byte + 1/4/8 value bytes), NOT plain uint32.
+            if marker_samples:
+                buf = bytearray()
+                buf += struct.pack('<I', 2)
+                buf += self._encode_varlen(len(marker_samples))
+                for ts, text in marker_samples:
+                    encoded = text.encode('utf-8') if isinstance(text, str) else text
+                    buf += struct.pack('<Bd', 8, ts)
+                    buf += self._encode_varlen(len(encoded))
+                    buf += encoded
+                self._write_chunk(f, 3, bytes(buf))
+
+            # EEG StreamFooter  (tag 6, stream_id = 1)
+            first_eeg = eeg_samples[0][0] if eeg_samples else 0.0
+            last_eeg  = eeg_samples[-1][0] if eeg_samples else 0.0
+            eeg_ftr = (
+                f'<?xml version="1.0"?><info>'
+                f'<first_timestamp>{first_eeg}</first_timestamp>'
+                f'<last_timestamp>{last_eeg}</last_timestamp>'
+                f'<sample_count>{len(eeg_samples)}</sample_count>'
+                f'</info>'
+            )
+            self._write_chunk(f, 6, struct.pack('<I', 1) + eeg_ftr.encode('utf-8'))
+
+            # Marker StreamFooter  (tag 6, stream_id = 2)
+            first_mk = marker_samples[0][0] if marker_samples else 0.0
+            last_mk  = marker_samples[-1][0] if marker_samples else 0.0
+            mk_ftr = (
+                f'<?xml version="1.0"?><info>'
+                f'<first_timestamp>{first_mk}</first_timestamp>'
+                f'<last_timestamp>{last_mk}</last_timestamp>'
+                f'<sample_count>{len(marker_samples)}</sample_count>'
+                f'</info>'
+            )
+            self._write_chunk(f, 6, struct.pack('<I', 2) + mk_ftr.encode('utf-8'))
+
+        print(f"[XDF] Saved: {self.filepath}")
+
+
+class SegmentViewer(QMainWindow):
+    def __init__(self, window_size_sec=10.0, sampling_rate=125):
+        super().__init__()
+        # Try OpenGL for GPU-accelerated rendering (much smoother for real-time EEG).
+        # Packaged macOS .app bundles sometimes can't access the system OpenGL
+        # framework, so fall back to software QPainter rendering if it fails.
+        try:
+            from PyQt6.QtGui import QOpenGLContext
+            ctx = QOpenGLContext()
+            if ctx.create():
+                pg.setConfigOptions(useOpenGL=True, antialias=True)
+                print("OpenGL acceleration enabled")
+            else:
+                raise RuntimeError("Could not create OpenGL context")
+        except Exception as e:
+            pg.setConfigOptions(useOpenGL=False, antialias=True)
+            print(f"OpenGL not available — using software rendering ({e})")
+
+        self.raw_data = None  # No data loaded initially
+        self.window_size_sec = window_size_sec
+        self.sampling_rate = sampling_rate
+        self.display_mode = 'stacked'  # 'overlay' or 'stacked'
+        self.stacked_plot_item = None  # Created in setup_stacked_mode()
+        self.file_loaded = False
+        self.current_filename = ""
+        self.theme = 'dark'  # 'light' or 'dark'
+
+        # Initialize with no segmentation
+        self.segmented = None
+        self.num_windows = 0
+        self.num_channels = 0
+        self.num_samples = 0
+        self.current_window = 0
+        self.active_channels = set()
+        self.last_stacked_channels = set()  # Track which channels are in stacked layout
+        self.channel_names = []  # Channel names from file metadata (empty = use Ch1, Ch2, ...)
+
+        # Track last processed horizontal zoom value to avoid expensive updates
+        self.last_horizontal_zoom_value = None
+
+        # Vertical bounds mode: 'iqr' or 'minmax'
+        self.vertical_bounds_mode = 'iqr'
+
+        # Y-Range for stacked mode (amplitude scale per channel) - mne-lsl style
+        # This is the vertical spacing between channels AND the amplitude range shown
+        self.yRange = 100.0  # Default 100 uV scale
+        # Total vertical span for auto-spacing: divided among active channels
+        self.total_y_span = 1600.0
+        # Amplitude scale factor for stacked mode (1.0 = normal, >1 = zoomed in)
+        # This scales signal amplitude WITHIN each channel lane without changing lane spacing
+        self.channel_amplitude_scale = 1.0
+
+        # Available yRange presets for combo box
+        self.yRange_presets = {
+            '1 uV': 1.0, '10 uV': 10.0, '50 uV': 50.0, '100 uV': 100.0,
+            '200 uV': 200.0, '500 uV': 500.0, '1 mV': 1000.0, '5 mV': 5000.0,
+            '10 mV': 10000.0, '50 mV': 50000.0, '100 mV': 100000.0
+        }
+
+        # Channel colors (theme-dependent, generated by generate_channel_colors)
+        self.channel_colors = None
+        self.generate_channel_colors()
+
+        # Pre-computed channel means for fast stacked mode rendering
+        self.channel_means = None
+
+        # Flag to prevent double data updates during autoplay
+        self._skip_range_update = False
+
+        # Autoplay state
+        self.autoplay_active = False
+        self.autoplay_speed = 1.0  # 1x = real-time
+        self.autoplay_timer = QTimer()
+        self.autoplay_timer.timeout.connect(self.autoplay_step)
+        self.autoplay_current_time = 0.0  # Current time position in seconds
+
+        # Streaming mode variables
+        self.mode = 'file'  # 'file' or 'stream'
+        self.streaming_active = False
+        self.stream_first_update = True  # Flag for initial auto-range on first streaming update
+        self.board = None
+        self.board_id = None
+        self.lsl_inlet = None      # For LSL-based headsets (Neurable, etc.)
+        self.headset_source = None  # 'brainflow' or 'lsl_inlet'
+        self.eeg_channels = None
+        self.eeg_outlet = None
+        self.marker_outlet = None
+        self.stream_timer = QTimer()
+        self.stream_timer.timeout.connect(self.update_stream_data)
+        self.stream_buffer = None
+        self.stream_time_axis = None
+        self.stream_start_time = 0
+        self.patient_id = ""
+        self.trial_number = 1
+        self.xdf_recorder = None
+        self.xdf_save_dir = os.path.expanduser("~/Documents/EEG_Recordings")
+        self._xdf_save_dir_confirmed = False  # True after user has picked a dir at least once
+        self._pending_markers = []            # markers that arrived before XDF recorder was ready
+        self.markers = []           # [(time_sec: float, label: str)] for loaded file
+        self._marker_inf_lines = [] # currently displayed InfiniteLine objects
+
+        # Signal processing parameters
+        self.lowcut = 5.0
+        self.highcut = 35.0
+        self.notch_freq = 60.0
+        self.magnitude_scale = 100  # microvolts
+        # OpenBCI-style smooth: moving average window in seconds applied to display
+        self.smooth_seconds = 0.12  # Default 120ms window (or EMA alpha when in EMA mode)
+        self.smoothing_enabled = True
+        self.smooth_type = 'Box Filter'  # 'Box Filter' or 'EMA'
+
+        # Pre-calculated filter coefficients (will be computed when sampling rate is known)
+        self.filter_coeffs_valid = False
+        self.bandpass_b = None
+        self.bandpass_a = None
+        self.notch_b = None
+        self.notch_a = None
+        # Persistent filter states per channel for seamless chunk-to-chunk filtering
+        self.bandpass_zi = {}  # channel_idx -> filter state
+        self.notch_zi = {}    # channel_idx -> filter state
+
+        # Streaming plot item references (reused to avoid memory leak)
+        self.streaming_plot_items = {}  # Channel index -> PlotDataItem
+        self.fft_plot_items = {}  # Channel index -> PlotDataItem
+        self.band_power_bar_item = None  # Single BarGraphItem for band power
+
+        # FFT and band power tracking
+        self.fft_data = {}
+        self.band_power_data = {
+            'delta': {},  # 0.5-4 Hz
+            'theta': {},  # 4-8 Hz
+            'alpha': {},  # 8-13 Hz
+            'beta': {},   # 13-30 Hz
+            'gamma': {}   # 30-50 Hz
+        }
+        # Throttle FFT/band power updates (these are expensive, no need at 60Hz)
+        self.fft_update_counter = 0
+        self.fft_update_interval = 3  # Update FFT every 3rd frame (~20Hz)
+
+        # Smoothing for FFT and band power
+        # Higher alpha = more responsive to current data; frequency-domain smoothing handles visual smoothness
+        self.fft_smoothing_alpha = 0.2
+        self.band_power_smoothing_alpha = 0.2
+        self.smoothed_fft = {}  # Stores smoothed FFT for each channel
+        self.smoothed_band_power = {}  # Stores smoothed band power
+        self.band_power_y_max = 0.0  # Stable Y-axis max for band power
+        
+        self.setWindowTitle("Longhorn Neural Interface Platform - No File Loaded")
+        self.setGeometry(100, 100, 1600, 900)
+        self.setWindowIcon(QIcon(resource_path("145164501.png")))
+
+        # Main widget and layout
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout_container = QHBoxLayout(main_widget)
+
+        # Left panel for controls (scrollable so buttons never get compressed)
+        left_panel_scroll = QScrollArea()
+        left_panel_scroll.setWidgetResizable(True)
+        left_panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_panel_scroll.setMaximumWidth(350)
+        left_panel = QWidget()
+        left_panel_layout = QVBoxLayout(left_panel)
+        left_panel_layout.setContentsMargins(4, 4, 4, 4)
+
+        # ---- Brand banner (top-left) ----------------------------------------
+        self._banner_menu = QMenu(self)
+        self._banner_menu.setStyleSheet("""
+            QMenu {
+                background-color: rgba(33, 60, 88, 1.0);
+                border: 1px solid rgba(89, 139, 188, 1.0);
+                border-radius: 6px;
+                padding: 4px 0px;
+            }
+            QMenu::item {
+                color: rgba(249, 246, 238, 1.0);
+                padding: 6px 12px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QMenu::item:selected {
+                background: rgba(89, 139, 188, 1.0);
+                color: rgba(255, 255, 255, 1.0);
+                border-radius: 4px;
+            }
+        """)
+        _website_action = QAction("Visit Website", self)
+        _website_action.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://lhneurotech.com/")))
+        _github_action = QAction("Visit GitHub", self)
+        _github_action.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://github.com/LonghornNeurotech")))
+        _about_action = QAction("About", self)
+        _about_action.triggered.connect(self._show_about_dialog)
+        self._banner_menu.addAction(_website_action)
+        self._banner_menu.addAction(_github_action)
+        self._banner_menu.addSeparator()
+        self._banner_menu.addAction(_about_action)
+
+        self.banner_btn = QToolButton()
+        self.banner_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.banner_btn.setMenu(self._banner_menu)
+        _banner_pix = QPixmap(resource_path("banner.png"))
+        if not _banner_pix.isNull():
+            _banner_pix = _banner_pix.scaledToHeight(
+                48, Qt.TransformationMode.SmoothTransformation)
+            self.banner_btn.setIcon(QIcon(_banner_pix))
+            self.banner_btn.setIconSize(_banner_pix.size())
+            self.banner_btn.setFixedSize(_banner_pix.size())
+            self._banner_menu.setMinimumWidth(_banner_pix.width())
+        self.banner_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.banner_btn.setStyleSheet("""
+            QToolButton {
+                border: none;
+                background: transparent;
+                padding: 0px;
+                margin: 0px;
+            }
+            QToolButton:hover { background: rgba(89, 139, 188, 0.15); }
+            QToolButton::menu-indicator { image: none; }
+        """)
+        left_panel_layout.addWidget(self.banner_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        left_panel_layout.setSpacing(4)
+
+        # Mode selection
+        mode_group = QGroupBox("Mode Selection")
+        mode_layout = QVBoxLayout()
+        self.file_mode_radio = QRadioButton("File Mode")
+        self.stream_mode_radio = QRadioButton("Streaming Mode")
+        self.file_mode_radio.setChecked(True)
+        self.file_mode_radio.toggled.connect(self.on_mode_changed)
+        mode_layout.addWidget(self.file_mode_radio)
+        mode_layout.addWidget(self.stream_mode_radio)
+        mode_group.setLayout(mode_layout)
+        left_panel_layout.addWidget(mode_group)
+
+        # File loading section
+        self.file_group = QGroupBox("File Loading")
+        file_layout = QVBoxLayout()
+        load_file_btn = QPushButton("Load File")
+        load_file_btn.clicked.connect(self.load_file)
+        file_layout.addWidget(load_file_btn)
+
+        self.file_label = QLabel("No file loaded")
+        self.file_label.setStyleSheet("color: gray; font-style: italic;")
+        file_layout.addWidget(self.file_label)
+        self.file_group.setLayout(file_layout)
+        left_panel_layout.addWidget(self.file_group)
+
+        # Streaming controls section
+        self.stream_group = QGroupBox("Streaming Controls")
+        stream_layout = QVBoxLayout()
+
+        # Auto-connect button
+        self.connect_btn = QPushButton("Auto-Connect Headset")
+        self.connect_btn.clicked.connect(self.auto_connect_headset)
+        stream_layout.addWidget(self.connect_btn)
+
+        self.connection_status = QLabel("Not connected")
+        self.connection_status.setStyleSheet("color: red;")
+        stream_layout.addWidget(self.connection_status)
+
+        # Patient ID and Trial number
+        patient_layout = QHBoxLayout()
+        patient_layout.addWidget(QLabel("Patient ID:"))
+        self.patient_id_input = QLineEdit()
+        self.patient_id_input.setPlaceholderText("e.g., P001")
+        patient_layout.addWidget(self.patient_id_input)
+        stream_layout.addLayout(patient_layout)
+
+        trial_layout = QHBoxLayout()
+        trial_layout.addWidget(QLabel("Trial:"))
+        self.trial_spinbox = QSpinBox()
+        self.trial_spinbox.setRange(1, 9999)
+        self.trial_spinbox.setValue(1)
+        trial_layout.addWidget(self.trial_spinbox)
+        stream_layout.addLayout(trial_layout)
+
+        # LSL Stream controls
+        stream_layout.addWidget(QLabel("LSL Streams:"))
+        self.start_eeg_stream_btn = QPushButton("Start EEG Stream")
+        self.start_eeg_stream_btn.clicked.connect(self.start_eeg_stream)
+        self.start_eeg_stream_btn.setEnabled(False)
+        stream_layout.addWidget(self.start_eeg_stream_btn)
+
+        self.start_marker_stream_btn = QPushButton("Start Marker Stream")
+        self.start_marker_stream_btn.clicked.connect(self.start_marker_stream)
+        self.start_marker_stream_btn.setEnabled(False)
+        stream_layout.addWidget(self.start_marker_stream_btn)
+
+        self.eeg_stream_status = QLabel("EEG Stream: Inactive")
+        self.eeg_stream_status.setStyleSheet("color: gray;")
+        stream_layout.addWidget(self.eeg_stream_status)
+
+        self.marker_stream_status = QLabel("Marker Stream: Inactive")
+        self.marker_stream_status.setStyleSheet("color: gray;")
+        stream_layout.addWidget(self.marker_stream_status)
+
+        # Start/Stop visualization
+        self.start_viz_btn = QPushButton("Start Visualization")
+        self.start_viz_btn.clicked.connect(self.toggle_streaming_visualization)
+        self.start_viz_btn.setEnabled(False)
+        stream_layout.addWidget(self.start_viz_btn)
+
+        # Manual XDF recording button
+        self.start_recording_btn = QPushButton("Start Recording")
+        self.start_recording_btn.clicked.connect(self.toggle_manual_recording)
+        self.start_recording_btn.setEnabled(False)
+        stream_layout.addWidget(self.start_recording_btn)
+
+        # Task launcher dropdown — sleek combo-style button
+        self._task_menu = QMenu(self)
+        self._task_menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a2e;
+                border: 1px solid #3dba55;
+                border-radius: 6px;
+                padding: 4px 0px;
+            }
+            QMenu::item {
+                color: #e8e8e8;
+                padding: 8px 18px 8px 14px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QMenu::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #52c96a, stop:1 #3dba55);
+                color: white;
+                border-radius: 4px;
+            }
+            QMenu::item:disabled { color: #555; }
+            QMenu::separator {
+                height: 1px;
+                background: #2e2e4a;
+                margin: 3px 8px;
+            }
+        """)
+
+        mi_action = QAction("Motor Imagery Task", self)
+        mi_action.triggered.connect(
+            lambda: (setattr(self, '_active_task', "Motor Imagery Task"),
+                     self.task_launcher_btn.setText("Motor Imagery Task"),
+                     self.motor_imagery_task()))
+        assr_action = QAction("ASSR Task", self)
+        assr_action.triggered.connect(
+            lambda: (setattr(self, '_active_task', "ASSR Task"),
+                     self.task_launcher_btn.setText("ASSR Task"),
+                     self.assr_task()))
+        prosthetic_action = QAction("Prosthetic Control", self)
+        prosthetic_action.triggered.connect(
+            lambda: (setattr(self, '_active_task', "Prosthetic Control"),
+                     self.task_launcher_btn.setText("Prosthetic Control"),
+                     self.launch_prosthetic()))
+        self._task_menu.addAction(mi_action)
+        self._task_menu.addAction(assr_action)
+        self._task_menu.addAction(prosthetic_action)
+
+        self._active_task = "Motor Imagery Task"
+        self.task_launcher_btn = QToolButton()
+        self.task_launcher_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.task_launcher_btn.setMenu(self._task_menu)
+        self.task_launcher_btn.setText("Motor Imagery Task")
+        self.task_launcher_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.task_launcher_btn.setEnabled(False)
+        self.task_launcher_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.task_launcher_btn.setStyleSheet("""
+            QToolButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #52c96a, stop:1 #3dba55);
+                color: white;
+                font-weight: bold;
+                font-size: 13px;
+                border: 1px solid #2a8c40;
+                border-radius: 6px;
+                padding: 6px 28px 6px 12px;
+                text-align: left;
+            }
+            QToolButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #63d97c, stop:1 #4dcc65);
+                border-color: #3dba55;
+            }
+            QToolButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #3dba55, stop:1 #2e8c40);
+            }
+            QToolButton:disabled {
+                background: #2a2a3a;
+                color: #555;
+                border-color: #3a3a4a;
+            }
+            QToolButton::menu-indicator {
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                right: 10px;
+                width: 10px;
+            }
+        """)
+        stream_layout.addWidget(self.task_launcher_btn)
+
+        self.stream_group.setLayout(stream_layout)
+        self.stream_group.setEnabled(False)
+        left_panel_layout.addWidget(self.stream_group)
+
+        # Signal processing controls
+        self.signal_group = QGroupBox("Signal Processing")
+        signal_layout = QVBoxLayout()
+
+        # Magnitude scaling
+        mag_layout = QHBoxLayout()
+        mag_layout.addWidget(QLabel("Magnitude (µV):"))
+        self.magnitude_combo = QComboBox()
+        self.magnitude_combo.addItems(['5', '10', '15', '25', '50', '100', '200'])
+        self.magnitude_combo.setCurrentText('200')
+        self.magnitude_combo.currentTextChanged.connect(self.on_magnitude_changed)
+        mag_layout.addWidget(self.magnitude_combo)
+        signal_layout.addLayout(mag_layout)
+
+        # OpenBCI-style Smooth control (time-based moving average window)
+        smooth_layout = QHBoxLayout()
+        self.smooth_checkbox = QCheckBox("Smooth:")
+        self.smooth_checkbox.setChecked(True)
+        self.smooth_checkbox.stateChanged.connect(self.on_smooth_checkbox_changed)
+        smooth_layout.addWidget(self.smooth_checkbox)
+        self.smooth_type_combo = QComboBox()
+        self.smooth_type_combo.addItems(['Box Filter', 'EMA'])
+        self.smooth_type_combo.setMaximumWidth(90)
+        self.smooth_type_combo.currentTextChanged.connect(self.on_smooth_type_changed)
+        smooth_layout.addWidget(self.smooth_type_combo)
+        self.smooth_slider = QSlider(Qt.Orientation.Horizontal)
+        self.smooth_slider.setMinimum(1)    # 10 ms (Box) / α 0.05 (EMA)
+        self.smooth_slider.setMaximum(50)   # 500 ms (Box) / α 0.95 (EMA)
+        self.smooth_slider.setValue(12)     # Default 120 ms
+        self.smooth_slider.valueChanged.connect(self.on_smooth_slider_changed)
+        smooth_layout.addWidget(self.smooth_slider)
+        self.smooth_label = QLabel("120 ms")
+        self.smooth_label.setMinimumWidth(52)
+        smooth_layout.addWidget(self.smooth_label)
+        signal_layout.addLayout(smooth_layout)
+
+        self.signal_group.setLayout(signal_layout)
+        self.signal_group.setEnabled(False)
+        left_panel_layout.addWidget(self.signal_group)
+
+        left_panel_layout.addStretch()
+        left_panel_scroll.setWidget(left_panel)
+        main_layout_container.addWidget(left_panel_scroll)
+
+        # Right side: Main content area
+        right_panel = QWidget()
+        self.main_layout = QVBoxLayout(right_panel)
+        main_layout_container.addWidget(right_panel, stretch=1)
+        
+        # Channel selection dropdown (initially disabled but visible)
+        self.channel_group = QGroupBox("Channel Selection")
+        channel_layout = QHBoxLayout()
+
+        # "Select All" checkbox
+        self.select_all_checkbox = QCheckBox("Select All")
+        self.select_all_checkbox.stateChanged.connect(self.toggle_all_channels)
+        channel_layout.addWidget(self.select_all_checkbox)
+
+        # Channel dropdown button
+        self.channel_dropdown_btn = QPushButton("Select Channels")
+        self.channel_dropdown_menu = QMenu(self)
+        self.channel_dropdown_btn.setMenu(self.channel_dropdown_menu)
+        channel_layout.addWidget(self.channel_dropdown_btn)
+
+        # Label showing selected channels
+        self.selected_channels_label = QLabel("No channels selected")
+        channel_layout.addWidget(self.selected_channels_label)
+        channel_layout.addStretch()
+
+        self.channel_checkboxes = []
+        self.channel_group.setLayout(channel_layout)
+        self.channel_group.setEnabled(False)  # Disabled until file loaded
+        self.main_layout.addWidget(self.channel_group)
+
+        # Create tabs for different visualizations
+        self.viz_tabs = QTabWidget()
+
+        # Main EEG plot tab
+        main_plot_tab = QWidget()
+        main_plot_layout = QVBoxLayout(main_plot_tab)
+        main_plot_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create a container for plot area with zoom sliders
+        plot_and_zoom_widget = QWidget()
+        plot_and_zoom_layout = QHBoxLayout(plot_and_zoom_widget)
+        plot_and_zoom_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Set minimum height for plot area to ensure controls are accessible
+        plot_and_zoom_widget.setMinimumHeight(400)
+        
+        # Vertical zoom controls on the left
+        vertical_zoom_widget = QWidget()
+        vertical_zoom_layout = QVBoxLayout(vertical_zoom_widget)
+        vertical_zoom_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Vertical zoom slider (Y-axis zoom)
+        self.vertical_zoom_slider = QSlider(Qt.Orientation.Vertical)
+        self.vertical_zoom_slider.setMinimum(10)  # 10% zoom (zoomed out)
+        self.vertical_zoom_slider.setMaximum(500)  # 500% zoom (zoomed in)
+        self.vertical_zoom_slider.setValue(100)  # 100% = normal
+        self.vertical_zoom_slider.setTickPosition(QSlider.TickPosition.TicksRight)
+        self.vertical_zoom_slider.setTickInterval(50)
+        self.vertical_zoom_slider.valueChanged.connect(self.on_vertical_zoom_slider_changed)
+        self.vertical_zoom_slider.setEnabled(False)  # Disabled until file loaded
+        vertical_zoom_layout.addWidget(self.vertical_zoom_slider, stretch=1)
+        
+        # Vertical zoom spinbox for manual input (with decimal support)
+        self.vertical_zoom_spinbox = QDoubleSpinBox()
+        self.vertical_zoom_spinbox.setRange(0.01, 10000.0)  # Allow much wider range than slider, including tiny values
+        self.vertical_zoom_spinbox.setSingleStep(1.0)
+        self.vertical_zoom_spinbox.setDecimals(2)  # Allow 2 decimal places
+        self.vertical_zoom_spinbox.setValue(100.0)
+        self.vertical_zoom_spinbox.setSuffix("%")
+        self.vertical_zoom_spinbox.setMaximumWidth(80)
+        self.vertical_zoom_spinbox.setEnabled(False)  # Disabled until file loaded
+        self.vertical_zoom_spinbox.valueChanged.connect(self.on_vertical_zoom_spinbox_changed)
+        vertical_zoom_layout.addWidget(self.vertical_zoom_spinbox)
+        
+        # Vertical bounds mode dropdown
+        self.bounds_mode_combo = QComboBox()
+        self.bounds_mode_combo.addItems(["IQR Bounds", "Min-Max Bounds"])
+        self.bounds_mode_combo.setCurrentIndex(0)  # Start with IQR
+        self.bounds_mode_combo.setMaximumWidth(120)
+        self.bounds_mode_combo.setToolTip("Select vertical axis bounds calculation method")
+        self.bounds_mode_combo.currentIndexChanged.connect(self.on_bounds_mode_changed)
+        self.bounds_mode_combo.setEnabled(False)  # Disabled until file loaded
+        vertical_zoom_layout.addWidget(self.bounds_mode_combo)
+        
+        plot_and_zoom_layout.addWidget(vertical_zoom_widget)
+        
+        # Right side: plot container + horizontal zoom slider
+        plot_column_widget = QWidget()
+        plot_column_layout = QVBoxLayout(plot_column_widget)
+        plot_column_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Plot container (will be replaced when switching modes)
+        self.plot_container = QWidget()
+        self.plot_layout = QVBoxLayout(self.plot_container)
+        self.plot_layout.setSpacing(0)  # Remove spacing between plots for tight stacking
+        self.plot_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
+        plot_column_layout.addWidget(self.plot_container, stretch=1)  # Give plot area most of the space
+        
+        # Horizontal zoom slider (X-axis/time zoom) on the bottom
+        horizontal_zoom_widget = QWidget()
+        horizontal_zoom_layout = QHBoxLayout(horizontal_zoom_widget)
+        horizontal_zoom_layout.setContentsMargins(0, 0, 0, 0)
+        
+        horizontal_zoom_layout.addWidget(QLabel("Window Length:"))
+        self.horizontal_zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.horizontal_zoom_slider.setMinimum(10)  # 0.1 seconds minimum
+        self.horizontal_zoom_slider.setMaximum(600)  # 60.0 seconds maximum
+        self.horizontal_zoom_slider.setValue(int(self.window_size_sec * 10))  # Scale by 10 for finer control
+        self.horizontal_zoom_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.horizontal_zoom_slider.setTickInterval(50)
+        self.horizontal_zoom_slider.valueChanged.connect(self.on_horizontal_zoom_changed)
+        self.horizontal_zoom_slider.setEnabled(False)  # Disabled until file loaded
+        self.horizontal_zoom_slider.setMaximumWidth(300)  # Shrink slider width
+        horizontal_zoom_layout.addWidget(self.horizontal_zoom_slider)
+        
+        # Window size spinbox (replaces label)
+        self.window_size_spinbox = QDoubleSpinBox()
+        self.window_size_spinbox.setRange(0.1, 60.0)
+        self.window_size_spinbox.setSingleStep(0.1)
+        self.window_size_spinbox.setValue(self.window_size_sec)
+        self.window_size_spinbox.setDecimals(1)
+        self.window_size_spinbox.setSuffix(" s")
+        self.window_size_spinbox.setMaximumWidth(80)
+        self.window_size_spinbox.valueChanged.connect(self.on_window_size_spinbox_changed)
+        self.window_size_spinbox.setEnabled(False)  # Disabled until file loaded
+        horizontal_zoom_layout.addWidget(self.window_size_spinbox)
+        
+        # Sampling rate spinbox
+        horizontal_zoom_layout.addWidget(QLabel("  Sampling Rate:"))
+        self.sampling_rate_spinbox = QSpinBox()
+        self.sampling_rate_spinbox.setRange(1, 10000)
+        self.sampling_rate_spinbox.setSingleStep(1)
+        self.sampling_rate_spinbox.setValue(self.sampling_rate)
+        self.sampling_rate_spinbox.setSuffix(" Hz")
+        self.sampling_rate_spinbox.setMaximumWidth(100)
+        self.sampling_rate_spinbox.valueChanged.connect(self.on_sampling_rate_changed)
+        self.sampling_rate_spinbox.setEnabled(False)  # Disabled until file loaded
+        horizontal_zoom_layout.addWidget(self.sampling_rate_spinbox)
+        
+        # Play/Pause button (replaces autoplay toggle)
+        self.play_pause_btn = QPushButton("▶ Play")
+        self.play_pause_btn.clicked.connect(self.on_spacebar)
+        self.play_pause_btn.setEnabled(False)  # Disabled until file loaded
+        self.play_pause_btn.setMaximumWidth(130)
+        self.play_pause_btn.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        horizontal_zoom_layout.addWidget(self.play_pause_btn)
+
+        # Playback speed
+        horizontal_zoom_layout.addWidget(QLabel("Speed:"))
+        self.playback_speed_spinbox = QDoubleSpinBox()
+        self.playback_speed_spinbox.setRange(0.1, 10.0)
+        self.playback_speed_spinbox.setSingleStep(0.1)
+        self.playback_speed_spinbox.setValue(1.0)
+        self.playback_speed_spinbox.setDecimals(1)
+        self.playback_speed_spinbox.setSuffix("x")
+        self.playback_speed_spinbox.setMaximumWidth(80)
+        self.playback_speed_spinbox.valueChanged.connect(self.on_playback_speed_changed)
+        horizontal_zoom_layout.addWidget(self.playback_speed_spinbox)
+
+        horizontal_zoom_layout.addStretch()  # Push everything to the left
+        
+        plot_column_layout.addWidget(horizontal_zoom_widget)
+        
+        plot_and_zoom_layout.addWidget(plot_column_widget, stretch=1)
+
+        main_plot_layout.addWidget(plot_and_zoom_widget, stretch=1)
+        self.viz_tabs.addTab(main_plot_tab, "EEG Data")
+
+        # FFT tab
+        fft_tab = QWidget()
+        fft_layout = QVBoxLayout(fft_tab)
+        self.fft_plot_widget = pg.PlotWidget()
+        self.fft_plot_widget.setLabel('bottom', 'Frequency (Hz)')
+        self.fft_plot_widget.setLabel('left', 'Power (dB)')
+        self.fft_plot_widget.setTitle('Real-time FFT')
+        self.fft_plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        fft_layout.addWidget(self.fft_plot_widget)
+        self.viz_tabs.addTab(fft_tab, "FFT")
+
+        # Band Power tab
+        band_power_tab = QWidget()
+        band_power_layout = QVBoxLayout(band_power_tab)
+        self.band_power_plot_widget = pg.PlotWidget()
+        self.band_power_plot_widget.setLabel('bottom', 'Frequency Band')
+        self.band_power_plot_widget.setLabel('left', 'Power')
+        self.band_power_plot_widget.setTitle('Real-time Band Power')
+        self.band_power_plot_widget.showGrid(x=False, y=True, alpha=0.3)
+        band_power_layout.addWidget(self.band_power_plot_widget)
+        self.viz_tabs.addTab(band_power_tab, "Band Power")
+
+        self.main_layout.addWidget(self.viz_tabs, stretch=1)
+        
+        # Create initial "no file" message
+        self.no_file_label = QLabel("No file loaded\n\nClick 'Load File' to begin")
+        self.no_file_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.no_file_label.setStyleSheet("font-size: 24px; color: gray;")
+        self.plot_layout.addWidget(self.no_file_label)
+        
+        # Window navigation (file mode only - hidden in streaming mode)
+        self.nav_widget = QWidget()
+        nav_layout = QHBoxLayout(self.nav_widget)
+
+        # Slider
+        nav_layout.addWidget(QLabel("Window:"))
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(0)
+        self.slider.setValue(0)
+        self.slider.valueChanged.connect(self.on_slider_changed)
+        nav_layout.addWidget(self.slider)
+
+        # SpinBox for direct input
+        self.spinbox = QSpinBox()
+        self.spinbox.setMinimum(0)
+        self.spinbox.setMaximum(0)
+        self.spinbox.setValue(0)
+        self.spinbox.valueChanged.connect(self.on_spinbox_changed)
+        nav_layout.addWidget(self.spinbox)
+
+        # Previous/Next buttons
+        self.prev_btn = QPushButton("◄ Prev")
+        self.prev_btn.clicked.connect(self.prev_window)
+        nav_layout.addWidget(self.prev_btn)
+
+        self.next_btn = QPushButton("Next ►")
+        self.next_btn.clicked.connect(self.next_window)
+        nav_layout.addWidget(self.next_btn)
+
+        # Window info label
+        self.info_label = QLabel("No file loaded")
+        nav_layout.addWidget(self.info_label)
+
+        self.nav_widget.setEnabled(False)  # Disabled until file loaded
+        self.main_layout.addWidget(self.nav_widget)
+
+        # Tools widget (always visible in both file and streaming modes)
+        self.tools_widget = QWidget()
+        tools_layout = QHBoxLayout(self.tools_widget)
+        tools_layout.setContentsMargins(0, 0, 0, 0)
+
+        tools_layout.addStretch()
+
+        # Auto-fit button
+        self.autofit_btn = QPushButton("Auto-Fit")
+        self.autofit_btn.clicked.connect(self.auto_fit_plot)
+        tools_layout.addWidget(self.autofit_btn)
+
+        # Settings button
+        self.settings_btn = QPushButton("Settings")
+        self.settings_btn.clicked.connect(self.open_settings_dialog)
+        tools_layout.addWidget(self.settings_btn)
+
+        self.main_layout.addWidget(self.tools_widget)
+
+        # Apply initial theme
+        self.apply_theme()
+
+        # Buttons accept click focus (so clicking them deselects spinboxes) but
+        # the QShortcut below intercepts spacebar before any button can process it
+        for btn in self.findChildren(QPushButton):
+            btn.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+
+        # Global spacebar shortcut for play/pause or start/stop streaming
+        spacebar_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        spacebar_shortcut.activated.connect(self.on_spacebar)
+
+        # Set aspect ratio constraints to preserve display ratio
+        self.setMinimumSize(QSize(1200, 675))  # 16:9 ratio
+        self.resize(1600, 900)  # Default 16:9 size
+
+    def load_file(self):
+        """Open file dialog to load .gdf or .pkl file"""
+        xdf_filter = ";;XDF Files (*.xdf)" if PYXDF_AVAILABLE else ""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open EEG File",
+            "",
+            f"EEG Files (*.gdf *.pkl{' *.xdf' if PYXDF_AVAILABLE else ''});;GDF Files (*.gdf);;Pickle Files (*.pkl){xdf_filter};;All Files (*)"
+        )
+
+        if not file_path:
+            return  # User cancelled
+
+        try:
+            # Load data based on file extension
+            self.markers = []  # reset markers from any previous file
+            if file_path.endswith('.gdf'):
+                self.raw_data, file_metadata = get_gdf_array(file_path)
+            elif file_path.endswith('.pkl'):
+                self.raw_data, file_metadata = get_pkl_array(file_path)
+            elif file_path.endswith('.xdf'):
+                if not PYXDF_AVAILABLE:
+                    QMessageBox.warning(self, "Error", "pyxdf is not installed. Run: pip install pyxdf")
+                    return
+                self.raw_data, srate, ch_names, self.markers = self._load_xdf(file_path)
+                file_metadata = {'sfreq': srate, 'ch_names': ch_names}
+            else:
+                QMessageBox.warning(self, "Error", "Unsupported file type. Please select a .gdf, .pkl, or .xdf file.")
+                return
+
+            # Apply metadata from file (sampling rate, channel names)
+            if 'sfreq' in file_metadata:
+                self.sampling_rate = int(file_metadata['sfreq'])
+                self.sampling_rate_spinbox.blockSignals(True)
+                self.sampling_rate_spinbox.setValue(self.sampling_rate)
+                self.sampling_rate_spinbox.blockSignals(False)
+            if 'ch_names' in file_metadata:
+                self.channel_names = file_metadata['ch_names']
+            else:
+                self.channel_names = []
+
+            # Reset smoothing buffers and plot items to prevent shape mismatch with previous stream/file
+            self.smoothed_fft = {}
+            self.smoothed_band_power = {}
+            self.band_power_y_max = 0.0
+            self.fft_plot_items.clear()
+            self.band_power_bar_item = None
+
+            # Update UI with loaded file
+            self.current_filename = file_path.split('/')[-1]
+            self.file_label.setText(f"Loaded: {self.current_filename}")
+            self.file_label.setStyleSheet("color: green; font-weight: bold;")
+            self.file_loaded = True
+            
+            # Prepare data and calculate window parameters
+            self.prepare_data()
+            self.current_window = 0
+
+            # Update window length slider/spinbox maximum based on file duration
+            file_duration_sec = self.raw_data.shape[1] / self.sampling_rate
+            self.horizontal_zoom_slider.setMaximum(int(file_duration_sec * 10))  # Scale by 10
+            self.window_size_spinbox.setMaximum(file_duration_sec)
+
+            # Initialize horizontal zoom tracking
+            self.last_horizontal_zoom_value = int(self.window_size_sec * 10)
+            
+            # Update window title
+            self.setWindowTitle(f"Longhorn Neural Interface Platform - {self.current_filename}  |  {self.num_windows} windows · {self.num_channels} ch")
+            
+            # Hide "no file" label before setting up plots (which will delete it)
+            if hasattr(self, 'no_file_label') and self.no_file_label is not None:
+                try:
+                    self.no_file_label.setVisible(False)
+                except RuntimeError:
+                    pass  # Widget already deleted
+            
+            # Setup plot based on current display mode (this will clear plot_layout)
+            if self.display_mode == 'overlay':
+                self.setup_overlay_mode()
+            else:
+                self.setup_stacked_mode()
+            
+            # Setup channel checkboxes in dropdown
+            self.channel_dropdown_menu.clear()
+            self.channel_checkboxes = []
+            self.active_channels.clear()  # Reset active channels
+
+            for i in range(self.num_channels):
+                cb = QCheckBox(self.get_channel_name(i))
+                cb.stateChanged.connect(lambda state, ch=i: self.toggle_channel(ch, state))
+                self.channel_checkboxes.append(cb)
+
+                # Add checkbox to menu
+                action = QWidgetAction(self.channel_dropdown_menu)
+                action.setDefaultWidget(cb)
+                self.channel_dropdown_menu.addAction(action)
+
+            # Enable channel group
+            self.channel_group.setEnabled(True)
+
+            # Enable zoom sliders and spinboxes
+            self.vertical_zoom_slider.setEnabled(True)
+            self.vertical_zoom_spinbox.setEnabled(True)
+            self.bounds_mode_combo.setEnabled(True)
+            self.horizontal_zoom_slider.setEnabled(True)
+            self.window_size_spinbox.setEnabled(True)
+            self.sampling_rate_spinbox.setEnabled(True)
+            self.play_pause_btn.setEnabled(True)  # Enable play button
+            
+            # Update navigation controls
+            self.slider.setMaximum(self.num_windows - 1)
+            self.spinbox.setMaximum(self.num_windows - 1)
+            self.slider.setValue(0)
+            self.spinbox.setValue(0)
+            self.info_label.setText(f"Window 0 / {self.num_windows-1}")
+            
+            # Enable navigation
+            self.nav_widget.setEnabled(True)
+            
+            # Initialize with first channel selected
+            self.channel_checkboxes[0].setChecked(True)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load file:\n{str(e)}")
+    
+    
+    def _load_xdf(self, path):
+        """Load an XDF file and return (raw_data, srate, ch_names, markers).
+
+        raw_data : np.ndarray  shape [n_channels, n_samples]
+        srate    : int         nominal sampling rate in Hz
+        ch_names : list[str]   channel labels
+        markers  : list of (time_sec: float, label: str)  relative to first EEG sample
+        """
+        streams, _ = pyxdf.load_xdf(path)
+
+        # Pick the EEG stream: prefer type='EEG', else the numeric stream with most channels
+        eeg_stream = None
+        for s in streams:
+            stype = s['info']['type'][0].upper()
+            fmt   = s['info'].get('channel_format', ['string'])[0]
+            if fmt == 'string':
+                continue
+            ts = s['time_stamps']
+            if ts is None or len(ts) == 0:
+                continue
+            if stype == 'EEG':
+                eeg_stream = s
+                break
+            n_ch = int(s['info']['channel_count'][0])
+            if eeg_stream is None or n_ch > int(eeg_stream['info']['channel_count'][0]):
+                eeg_stream = s
+
+        if eeg_stream is None:
+            raise ValueError("No EEG stream with samples found in the XDF file.")
+
+        data = np.array(eeg_stream['time_series'], dtype=float).T  # [n_ch, n_samples]
+
+        srate = float(eeg_stream['info']['nominal_srate'][0])
+        if srate <= 0:
+            ts_arr = eeg_stream['time_stamps']
+            srate = (len(ts_arr) - 1) / (ts_arr[-1] - ts_arr[0]) if len(ts_arr) > 1 else 250.0
+        srate = int(round(srate))
+
+        try:
+            ch_names = [
+                ch['label'][0]
+                for ch in eeg_stream['info']['desc'][0]['channels'][0]['channel']
+            ]
+        except Exception:
+            ch_names = [f"Ch{i + 1}" for i in range(data.shape[0])]
+
+        t0 = eeg_stream['time_stamps'][0]
+
+        # Collect markers from every string/marker stream
+        markers = []
+        for s in streams:
+            stype = s['info']['type'][0].upper()
+            fmt   = s['info'].get('channel_format', ['float32'])[0]
+            ts    = s['time_stamps']
+            if ts is None or (hasattr(ts, '__len__') and len(ts) == 0):
+                continue
+            if stype in ('MARKERS', 'MARKER', 'EVENTS', 'EVENT',
+                         'STIM', 'STIMULUS', 'TRIGGER') or fmt == 'string':
+                for stamp, row in zip(ts, s['time_series']):
+                    # row may be a numpy array (numeric markers) or a list
+                    # of strings (string markers).  Avoid bare `if row`
+                    # which raises ValueError on multi-element arrays.
+                    if hasattr(row, '__len__') and len(row) == 0:
+                        continue
+                    val = row[0]
+                    if fmt == 'string':
+                        label = str(val).strip()
+                    else:
+                        # Numeric marker: use the first channel as the event
+                        # code.  Skip 0 values which typically mean "no event".
+                        try:
+                            numeric_val = float(val)
+                        except (TypeError, ValueError):
+                            continue
+                        if numeric_val == 0:
+                            continue
+                        # Represent as an integer when possible for readability
+                        if numeric_val == int(numeric_val):
+                            label = str(int(numeric_val))
+                        else:
+                            label = str(numeric_val)
+                    if label:
+                        markers.append((stamp - t0, label))
+        markers.sort(key=lambda x: x[0])
+
+        return data, srate, ch_names, markers
+
+    def setup_overlay_mode(self):
+        """Setup single plot widget for overlay display"""
+        # Clear existing plots
+        while self.plot_layout.count():
+            child = self.plot_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        # Create single plot widget
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setLabel('bottom', 'Time (seconds)')
+        self.plot_widget.setLabel('left', 'Amplitude')
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_widget.addLegend()
+        
+        # Disable default mouse wheel behavior and add custom zoom
+        self.plot_widget.setMouseEnabled(x=True, y=True)
+        view_box = self.plot_widget.getViewBox()
+        view_box.setMouseMode(pg.ViewBox.RectMode)
+        
+        # Install custom wheel event using a closure that properly captures view_box
+        def make_wheel_handler(vb):
+            return lambda event: self.custom_wheel_event(vb, event)
+        view_box.wheelEvent = make_wheel_handler(view_box)
+        
+        # Connect range change signal for dynamic updates
+        self.plot_widget.sigRangeChanged.connect(self.on_overlay_range_changed)
+        
+        self.plot_layout.addWidget(self.plot_widget)
+        self.plot_widgets = [self.plot_widget]  # Store in list for consistency
+        
+        # Dictionary to store plot items for each channel
+        self.overlay_plot_items = {}
+    
+    def setup_stacked_mode(self):
+        """Setup single plot widget with vertically offset channels (mne-lsl style)"""
+        # Clear existing plots
+        while self.plot_layout.count():
+            child = self.plot_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
+        # Create a custom GraphicsLayoutWidget with wheel scroll signal (like mne-lsl)
+        self.plot_widget = pg.GraphicsLayoutWidget()
+
+        # Add the main plot
+        self.stacked_plot_item = self.plot_widget.addPlot()
+        self.stacked_plot_item.setLabel('bottom', 'Time (s)')
+        self.stacked_plot_item.setLabel('left', f'Scale: {self.yRange:.0f} uV')
+        self.stacked_plot_item.showGrid(x=True, y=True, alpha=0.3)
+
+        # Disable auto-range for manual control (like mne-lsl)
+        self.stacked_plot_item.disableAutoRange()
+        self.stacked_plot_item.setMouseEnabled(x=True, y=False)  # Only allow X panning
+        self.stacked_plot_item.setMenuEnabled(False)
+
+        # Install wheel event: horizontal scroll = pan time, vertical scroll = amplitude zoom
+        view_box = self.stacked_plot_item.getViewBox()
+        def wheel_handler(event, axis=None):
+            delta = event.delta()
+            if delta == 0:
+                event.accept()
+                return
+
+            # pyqtgraph passes axis=0 for X, axis=1 for Y from AxisItem
+            # Also check event orientation for direct wheel events
+            if axis == 0:
+                orientation = Qt.Orientation.Horizontal
+            elif axis == 1:
+                orientation = Qt.Orientation.Vertical
+            elif hasattr(event, 'orientation'):
+                orientation = event.orientation()
+            else:
+                orientation = Qt.Orientation.Vertical
+
+            if orientation == Qt.Orientation.Horizontal:
+                # Horizontal scroll: pan time axis
+                x_range = view_box.viewRange()[0]
+                x_size = x_range[1] - x_range[0]
+                pan_amount = -delta * 0.1 * x_size / 120.0
+                view_box.setXRange(x_range[0] + pan_amount, x_range[1] + pan_amount, 0)
+            else:
+                # Vertical scroll: adjust per-channel amplitude scale
+                notches = delta // 120
+                if notches != 0:
+                    scale_factor = 1.2
+                    if notches > 0:
+                        self.channel_amplitude_scale *= scale_factor
+                    else:
+                        self.channel_amplitude_scale /= scale_factor
+                    # Clamp to reasonable bounds
+                    self.channel_amplitude_scale = max(0.001, min(self.channel_amplitude_scale, 10000))
+                    # Sync the vertical zoom slider/spinbox to match
+                    slider_val = int(self.channel_amplitude_scale * 100)
+                    self.vertical_zoom_slider.blockSignals(True)
+                    self.vertical_zoom_spinbox.blockSignals(True)
+                    self.vertical_zoom_slider.setValue(max(10, min(500, slider_val)))
+                    self.vertical_zoom_spinbox.setValue(slider_val)
+                    self.vertical_zoom_slider.blockSignals(False)
+                    self.vertical_zoom_spinbox.blockSignals(False)
+                    # Redraw — route to correct update function
+                    if self.mode == 'stream' and self.streaming_active:
+                        self.update_streaming_plots()
+                    elif self.file_loaded:
+                        self.update_plot_stacked(rebuild_layout=False)
+            event.accept()
+        view_box.wheelEvent = wheel_handler
+
+        # Connect range change signal for X-axis panning
+        self.stacked_plot_item.sigXRangeChanged.connect(self.on_stacked_range_changed)
+
+        self.plot_layout.addWidget(self.plot_widget)
+        self.plot_widgets = [self.stacked_plot_item]
+
+        # Dictionary to store plot items for each channel
+        self.stacked_plot_items = {}
+    
+    def generate_channel_colors(self):
+        """Generate channel colors based on current theme"""
+        np.random.seed(42)
+        n = 64
+        if self.theme == 'dark':
+            # Warm palette (red-biased): bright on dark background
+            self.channel_colors = np.column_stack([
+                np.random.uniform(180, 255, n),
+                np.random.uniform(50, 180, n),
+                np.random.uniform(30, 100, n),
+            ])
+        else:
+            # Cool palette (blue-biased): darker on light background
+            self.channel_colors = np.column_stack([
+                np.random.uniform(20, 100, n),
+                np.random.uniform(40, 130, n),
+                np.random.uniform(140, 220, n),
+            ])
+
+    def prepare_data(self):
+        """Prepare data and calculate window parameters and vertical bounds"""
+        self.recalculate_windows()
+
+        # Pre-compute per-channel means for fast stacked-mode centering
+        self.channel_means = np.mean(self.raw_data, axis=1)
+
+        # Pre-calculate both IQR and min-max bounds for entire dataset (per channel)
+        # This is expensive so only do it once when file is loaded
+        self.channel_iqr_bounds = {}
+        self.channel_minmax_bounds = {}
+        
+        for ch_idx in range(self.num_channels):
+            # Get all data for this channel
+            if self.raw_data is None: return
+            channel_data = self.raw_data[ch_idx, :]
+            
+            # IQR bounds
+            q1 = np.quantile(channel_data, 0.25)
+            q3 = np.quantile(channel_data, 0.75)
+            iqr = q3 - q1
+            iqr_y_min = q1 - iqr * 5.0
+            iqr_y_max = q3 + iqr * 5.0
+            self.channel_iqr_bounds[ch_idx] = (iqr_y_min, iqr_y_max)
+            
+            # Min-Max bounds
+            minmax_y_min = np.min(channel_data)
+            minmax_y_max = np.max(channel_data)
+            self.channel_minmax_bounds[ch_idx] = (minmax_y_min, minmax_y_max)
+    
+    def get_channel_name(self, ch_idx):
+        """Get display name for a channel, using file metadata if available"""
+        if self.channel_names and ch_idx < len(self.channel_names):
+            return self.channel_names[ch_idx]
+        return f"Ch{ch_idx + 1}"
+
+    def compute_channel_spacing(self, num_active):
+        """Auto-calculate channel spacing d = total_y_span / (num_active + 1).
+
+        For N channels there are N+1 equal gaps: one above the top channel,
+        one between each adjacent pair, and one below the bottom channel.
+        """
+        if num_active <= 0:
+            return self.total_y_span
+        return self.total_y_span / (num_active + 1)
+
+    def recalculate_windows(self):
+        """Recalculate window parameters (fast, no IQR calculation)"""
+        # Calculate window parameters
+        self.window_size_samples = int(self.window_size_sec * self.sampling_rate)
+        self.stride = int(self.window_size_samples * 0.8)  # 20% overlap
+        
+        # Calculate number of windows (at least 1 if there's any data)
+        total_samples = self.raw_data.shape[1]
+        self.num_windows = max(1, (total_samples - self.window_size_samples) // self.stride + 1)
+        self.num_channels = self.raw_data.shape[0]
+        self.num_samples_per_window = self.window_size_samples
+        
+        # Create full time axis for entire dataset
+        self.full_time_axis = np.arange(total_samples) / self.sampling_rate
+    
+    def get_window_from_time(self, t_center):
+        """Calculate which window index corresponds to a given time point
+        
+        Args:
+            t_center: Time in seconds (typically center of visible range)
+            
+        Returns:
+            Window index (0 to num_windows-1)
+        """
+        # Convert time to sample index
+        sample_idx = int(t_center * self.sampling_rate)
+        
+        # Calculate which window this sample belongs to
+        # Window i starts at sample: i * stride
+        # Window i ends at sample: i * stride + window_size_samples
+        window_idx = sample_idx // self.stride
+        
+        # Clamp to valid range
+        window_idx = max(0, min(window_idx, self.num_windows - 1))
+        
+        return window_idx
+    
+    def update_window_controls_from_view(self):
+        """Update slider/spinbox to match the current view range"""
+        # Skip window control updates in streaming mode (no window navigation)
+        if self.mode == 'stream' or not self.file_loaded:
+            return
+        
+        # Get current view range based on display mode
+        if self.display_mode == 'overlay':
+            view_range = self.plot_widget.viewRange()[0]  # [x_min, x_max]
+        else:
+            # In stacked mode, use stacked_plot_item
+            if self.stacked_plot_item is None:
+                return
+            view_range = self.stacked_plot_item.viewRange()[0]
+        
+        # Calculate center of visible range
+        t_center = (view_range[0] + view_range[1]) / 2.0
+        
+        # Find corresponding window
+        new_window = self.get_window_from_time(t_center)
+        
+        # Update controls without triggering callbacks
+        if new_window != self.current_window:
+            self.slider.blockSignals(True)
+            self.spinbox.blockSignals(True)
+            self.current_window = new_window
+            self.slider.setValue(new_window)
+            self.spinbox.setValue(new_window)
+            self.info_label.setText(f"Window {new_window} / {self.num_windows-1}")
+            self.slider.blockSignals(False)
+            self.spinbox.blockSignals(False)
+    
+    def get_window_bounds(self, window_idx):
+        """Get start and end sample indices for a given window, clamped to valid range"""
+        total_samples = len(self.full_time_axis)
+        start_sample = max(0, window_idx * self.stride)
+        end_sample = min(start_sample + self.window_size_samples, total_samples)
+        return start_sample, end_sample
+    
+    def get_iqr_bounds_for_channels(self, channel_indices):
+        """Get the maximum IQR bounds across specified channels"""
+        if not channel_indices:
+            return (0, 1)  # Default if no channels
+        
+        # Find channel with greatest range
+        max_range = 0
+        best_bounds = None
+        for ch_idx in channel_indices:
+            y_min, y_max = self.channel_iqr_bounds[ch_idx]
+            range_size = y_max - y_min
+            if range_size > max_range:
+                max_range = range_size
+                best_bounds = (y_min, y_max)
+        
+        return best_bounds
+    
+    def get_minmax_bounds_for_channels(self, channel_indices):
+        """Get the maximum min-max bounds across specified channels"""
+        if not channel_indices:
+            return (0, 1)  # Default if no channels
+        
+        # Find channel with greatest range
+        max_range = 0
+        best_bounds = None
+        for ch_idx in channel_indices:
+            y_min, y_max = self.channel_minmax_bounds[ch_idx]
+            range_size = y_max - y_min
+            if range_size > max_range:
+                max_range = range_size
+                best_bounds = (y_min, y_max)
+        
+        return best_bounds
+    
+    def get_bounds_for_channels(self, channel_indices):
+        """Get bounds based on current vertical bounds mode"""
+        if self.vertical_bounds_mode == 'iqr':
+            return self.get_iqr_bounds_for_channels(channel_indices)
+        else:  # 'minmax'
+            return self.get_minmax_bounds_for_channels(channel_indices)
+    
+    def get_channel_bounds(self, ch_idx):
+        """Get bounds for a single channel based on current mode"""
+        if self.vertical_bounds_mode == 'iqr':
+            return self.channel_iqr_bounds[ch_idx]
+        else:  # 'minmax'
+            return self.channel_minmax_bounds[ch_idx]
+    
+    def on_bounds_mode_changed(self, index):
+        """Handle bounds mode dropdown selection change
+        
+        Args:
+            index: 0 for IQR, 1 for Min-Max
+        """
+        if not self.file_loaded:
+            return
+        
+        # Update mode based on selection
+        if index == 0:
+            self.vertical_bounds_mode = 'iqr'
+        else:
+            self.vertical_bounds_mode = 'minmax'
+        
+        # Reapply current zoom level with new bounds
+        current_zoom = self.vertical_zoom_spinbox.value()
+        self.apply_vertical_zoom(current_zoom)
+    
+    def custom_wheel_event(self, view_box, event):
+        """Custom mouse wheel handler:
+        - Respects setMouseEnabled settings
+        - Horizontal scroll (left/right): Pan time axis
+        - Vertical scroll: Disabled (to prevent accidental zooming)
+
+        Note: pyqtgraph uses QGraphicsSceneWheelEvent, not QWheelEvent, which has
+        different methods (delta() and orientation() instead of angleDelta()).
+        """
+        # Check if x-axis mouse interaction is enabled
+        # ViewBox.state['mouseEnabled'] is a list [x_bool, y_bool]
+        if not view_box.state['mouseEnabled'][0]:
+            event.accept()
+            return
+
+        # Get delta value (magnitude of scroll)
+        delta = event.delta()
+        
+        if delta == 0:
+            event.accept()
+            return
+        
+        # Check orientation
+        if hasattr(event, 'orientation'):
+            orientation = event.orientation()
+        else:
+            orientation = Qt.Orientation.Vertical
+        
+        if orientation == Qt.Orientation.Horizontal:
+            # Horizontal scroll: Pan time (X) axis left/right
+            # Get current view range
+            view_range = view_box.viewRange()
+            x_range = view_range[0]  # [x_min, x_max]
+            x_size = x_range[1] - x_range[0]
+            
+            # Pan sensitivity: 10% of visible range per scroll unit
+            pan_factor = 0.1
+            
+            # Positive delta = scroll right = move view left (show earlier data)
+            # Negative delta = scroll left = move view right (show later data)
+            pan_amount = -delta * pan_factor * x_size / 120.0  # Normalize delta (typically ±120 per scroll step)
+            new_x_min = x_range[0] + pan_amount
+            new_x_max = x_range[1] + pan_amount
+            view_box.setXRange(new_x_min, new_x_max)
+        # else: ignore vertical scroll
+        
+        event.accept()
+    
+    def apply_vertical_zoom(self, value):
+        """Apply vertical zoom to the plot (Y-axis zoom)
+
+        Args:
+            value: Zoom percentage (any positive value, where 100 = normal)
+        """
+        if not self.active_channels:
+            return
+
+        # Get the zoom factor (1.0 = 100%)
+        zoom_factor = value / 100.0
+
+        if self.display_mode == 'overlay':
+            if self.mode == 'stream' and self.streaming_active:
+                # In streaming mode, zoom based on magnitude scale setting
+                base_range = self.magnitude_scale  # microvolts
+                y_range = base_range / zoom_factor
+                self.plot_widget.setYRange(-y_range, y_range)
+            elif self.file_loaded:
+                # File mode: use pre-calculated channel bounds
+                y_min, y_max = self.get_bounds_for_channels(self.active_channels)
+                y_center = (y_min + y_max) / 2.0
+                y_range = (y_max - y_min) / zoom_factor
+
+                new_y_min = y_center - y_range / 2.0
+                new_y_max = y_center + y_range / 2.0
+                self.plot_widget.setYRange(new_y_min, new_y_max)
+        else:
+            # Stacked mode: scale signal amplitude within each channel lane
+            # Lane spacing stays fixed; signals get bigger/smaller within their lanes
+            self.channel_amplitude_scale = zoom_factor
+
+            # Redraw with new scale — route to the correct update function
+            if self.stacked_plot_item is not None:
+                if self.mode == 'stream' and self.streaming_active:
+                    self.update_streaming_plots()
+                elif self.file_loaded:
+                    self.update_plot_stacked(rebuild_layout=False)
+    
+    def on_vertical_zoom_slider_changed(self, value):
+        """Handle vertical zoom slider changes
+        
+        Args:
+            value: Slider value (10-500)
+        """
+        # Update spinbox to match slider
+        self.vertical_zoom_spinbox.blockSignals(True)
+        self.vertical_zoom_spinbox.setValue(value)
+        self.vertical_zoom_spinbox.blockSignals(False)
+        
+        # Apply the zoom
+        self.apply_vertical_zoom(value)
+    
+    def on_vertical_zoom_spinbox_changed(self, value):
+        """Handle vertical zoom spinbox changes
+        
+        Args:
+            value: Spinbox value (1-10000)
+        """
+        # Update slider to match spinbox (clamped to slider range)
+        slider_value = int(max(10, min(500, value)))
+        self.vertical_zoom_slider.blockSignals(True)
+        self.vertical_zoom_slider.setValue(slider_value)
+        self.vertical_zoom_slider.blockSignals(False)
+        
+        # Apply the zoom with the actual spinbox value (not clamped)
+        self.apply_vertical_zoom(value)
+    
+    def sync_navigation_controls(self):
+        """
+        Updates slider/spinbox max values and values after num_windows has changed.
+        This assumes self.recalculate_windows() or self.prepare_data() has 
+        already been called.
+        """
+        # 1. Clamp the internal current_window variable to be valid
+        self.current_window = max(0, min(self.current_window, self.num_windows - 1))
+            
+        # 2. Block signals to prevent infinite loops (e.g., slider changing spinbox)
+        self.slider.blockSignals(True)
+        self.spinbox.blockSignals(True)
+        
+        # 3. Set the new maximums
+        self.slider.setMaximum(self.num_windows - 1)
+        self.spinbox.setMaximum(self.num_windows - 1)
+        
+        # 4. Re-assert the (potentially clamped) current window value
+        #    This is the crucial step that forces the slider to update its visual handle
+        self.slider.setValue(self.current_window)
+        self.spinbox.setValue(self.current_window)
+        
+        # 5. Unblock signals
+        self.slider.blockSignals(False)
+        self.spinbox.blockSignals(False)
+        
+        # 6. Update labels
+        self.info_label.setText(f"Window {self.current_window} / {self.num_windows-1}")
+        self.setWindowTitle(f"Segment Viewer - {self.current_filename} - {self.num_windows} windows, {self.num_channels} channels")
+
+    def on_horizontal_zoom_changed(self, value):
+        """Handle horizontal zoom slider changes (time window size)
+
+        Args:
+            value: Window size in tenths of seconds (10-600, representing 0.1-60.0 seconds)
+        """
+        # Convert slider value to seconds (slider is scaled by 10 for finer control)
+        new_window_size = value / 10.0
+
+        # Update the spinbox
+        self.window_size_spinbox.blockSignals(True)
+        self.window_size_spinbox.setValue(new_window_size)
+        self.window_size_spinbox.blockSignals(False)
+
+        # Update window size
+        self.window_size_sec = new_window_size
+
+        # In streaming mode, resize the buffer to match the new window length
+        if self.mode == 'stream' and self.streaming_active:
+            self.resize_stream_buffer(new_window_size)
+            return
+
+        # File mode processing below
+        if not self.file_loaded:
+            return
+
+        # Stop autoplay if active
+        if self.autoplay_active and self.autoplay_timer.isActive():
+            self.autoplay_timer.stop()
+            self.play_pause_btn.setText("▶ Play")
+
+        # Only process if change is significant (> 1 unit = 0.1 seconds)
+        # This avoids expensive recalculations on every tiny slider movement
+        if self.last_horizontal_zoom_value is not None:
+            if abs(value - self.last_horizontal_zoom_value) < 1:
+                return
+
+        # Store this value as the last processed one
+        self.last_horizontal_zoom_value = value
+
+        # Get current view center BEFORE changing window size
+        if self.display_mode == 'overlay':
+            view_range = self.plot_widget.viewRange()[0]
+        elif self.stacked_plot_item is not None:
+            view_range = self.stacked_plot_item.viewRange()[0]
+        else:
+            return
+
+        t_center = (view_range[0] + view_range[1]) / 2.0
+
+        # Recalculate windows with new size
+        self.recalculate_windows()
+
+        # Update navigation controls and re-calculate windows
+        self.sync_navigation_controls()
+
+        # Calculate new view range centered on the same time point
+        t_start = t_center - (new_window_size / 2.0)
+        t_end = t_center + (new_window_size / 2.0)
+
+        # Clamp to valid time range
+        t_start = max(0, t_start)
+        t_end = min(self.full_time_axis[-1], t_end)
+
+        # Adjust center if we hit a boundary
+        if t_start == 0:
+            t_end = min(new_window_size, self.full_time_axis[-1])
+        elif t_end == self.full_time_axis[-1]:
+            t_start = max(0, self.full_time_axis[-1] - new_window_size)
+
+        # Set the new view range (this will trigger range_changed signal which updates window controls)
+        if self.display_mode == 'overlay':
+            self.plot_widget.setXRange(t_start, t_end)
+        else:
+            self.stacked_plot_item.setXRange(t_start, t_end)
+    
+    def on_window_size_spinbox_changed(self, value):
+        """Handle window size spinbox changes"""
+        # Update slider to match
+        slider_value = int(value * 10)
+        self.horizontal_zoom_slider.blockSignals(True)
+        self.horizontal_zoom_slider.setValue(slider_value)
+        self.horizontal_zoom_slider.blockSignals(False)
+
+        # Update window size
+        self.window_size_sec = value
+
+        # In streaming mode, resize the buffer to match the new window length
+        if self.mode == 'stream' and self.streaming_active:
+            self.resize_stream_buffer(value)
+            return
+
+        # File mode processing below
+        if not self.file_loaded:
+            return
+
+        # Stop autoplay if active
+        if self.autoplay_active and self.autoplay_timer.isActive():
+            self.autoplay_timer.stop()
+            self.play_pause_btn.setText("▶ Play")
+
+        # Update tracking variable
+        self.last_horizontal_zoom_value = slider_value
+
+        # Get current view center BEFORE changing window size
+        if self.display_mode == 'overlay':
+            view_range = self.plot_widget.viewRange()[0]
+        elif self.stacked_plot_item is not None:
+            view_range = self.stacked_plot_item.viewRange()[0]
+        else:
+            return
+
+        t_center = (view_range[0] + view_range[1]) / 2.0
+
+        # Recalculate windows with new size
+        self.recalculate_windows()
+
+        # Update navigation controls and re-calculate windows
+        self.sync_navigation_controls()
+
+        # Calculate new view range centered on the same time point
+        t_start = t_center - (value / 2.0)
+        t_end = t_center + (value / 2.0)
+
+        # Clamp to valid time range
+        t_start = max(0, t_start)
+        t_end = min(self.full_time_axis[-1], t_end)
+
+        # Adjust center if we hit a boundary
+        if t_start == 0:
+            t_end = min(value, self.full_time_axis[-1])
+        elif t_end == self.full_time_axis[-1]:
+            t_start = max(0, self.full_time_axis[-1] - value)
+
+        # Set the new view range (this will trigger range_changed signal which updates window controls)
+        if self.display_mode == 'overlay':
+            self.plot_widget.setXRange(t_start, t_end)
+        else:
+            self.stacked_plot_item.setXRange(t_start, t_end)
+    
+    def on_sampling_rate_changed(self, value):
+        """Handle sampling rate spinbox changes"""
+        if not self.file_loaded:
+            return
+        
+        self.sampling_rate = value
+        
+        # Recalculate everything including IQR bounds (sampling rate affects data interpretation)
+        self.prepare_data() # This also calls recalculate_windows()
+        
+        # Update UI
+        self.sync_navigation_controls()
+        
+        # Refresh plot
+        self.update_plot()
+    
+    def toggle_channel(self, channel_idx, state):
+        """Toggle channel visibility"""
+        if not self.file_loaded and not self.streaming_active:
+            return
+        # PyQt6 stateChanged emits int, not Qt.CheckState — convert before comparing
+        check_state = Qt.CheckState(state) if isinstance(state, int) else state
+        if check_state == Qt.CheckState.Checked:
+            self.active_channels.add(channel_idx)
+        else:
+            self.active_channels.discard(channel_idx)
+
+        # Update "Select All" checkbox state
+        self.select_all_checkbox.blockSignals(True)
+        if len(self.active_channels) == self.num_channels:
+            self.select_all_checkbox.setChecked(True)
+        elif len(self.active_channels) == 0:
+            self.select_all_checkbox.setChecked(False)
+        else:
+            self.select_all_checkbox.setCheckState(Qt.CheckState.PartiallyChecked)
+        self.select_all_checkbox.blockSignals(False)
+
+        self.update_selected_channels_label()
+
+        # Update plots for file mode only - streaming mode updates via timer
+        if self.file_loaded and not self.streaming_active:
+            self.update_plot()
+            self.calculate_fft_for_file()
+            self.calculate_band_power_for_file()
+
+    def update_plot(self, rebuild=True):
+        """Redraw plot with active channels and IQR-based bounds
+        
+        Args:
+            rebuild: If False, only update data without rebuilding plot structure (faster)
+        """
+        if not self.file_loaded:
+            return
+        if self.display_mode == 'overlay':
+            self.update_plot_overlay(set_y_range=rebuild)
+        else:
+            self.update_plot_stacked(rebuild_layout=rebuild)
+    
+    def get_visible_data_range(self, view_range):
+        """Get the sample indices for the visible time range, with some padding"""
+        t_min, t_max = view_range
+        # Add padding (show 20% extra on each side for smooth scrolling)
+        padding = (t_max - t_min) * 0.2
+        t_min_padded = max(0, t_min - padding)
+        t_max_padded = min(self.full_time_axis[-1], t_max + padding)
+        
+        # Convert time to sample indices
+        start_idx = max(0, int(t_min_padded * self.sampling_rate))
+        end_idx = min(len(self.full_time_axis), int(t_max_padded * self.sampling_rate))
+        
+        return start_idx, end_idx
+    
+    def _format_marker_label(self, label):
+        """Convert a raw marker string to a short, human-readable label.
+
+        Markers sent by the task UI are JSON dicts like:
+            {"stop": "BLINK", "start": "LEFT"}
+        This parses that and returns a compact string like "LEFT" or "■BLINK".
+        Plain strings are returned unchanged.
+        """
+        try:
+            data = json.loads(label)
+            if not isinstance(data, dict):
+                return str(label)
+            stop  = data.get('stop',  '') or ''
+            start = data.get('start', '') or ''
+            if stop and start:
+                return f"{stop} \u2192 {start}"   # e.g. "REST → BLINK"
+            if start:
+                return f"\u2192 {start}"
+            if stop:
+                return f"{stop} \u2192"
+            return label
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return label
+
+    def _draw_markers(self, plot_ref, t_start, t_end):
+        """Draw dashed vertical marker lines on plot_ref for the visible time window.
+
+        Removes any previously drawn marker lines first, then adds one
+        InfiniteLine per marker that falls within [t_start, t_end].
+        """
+        for line in self._marker_inf_lines:
+            try:
+                plot_ref.removeItem(line)
+            except Exception:
+                pass
+        self._marker_inf_lines.clear()
+
+        if not self.markers:
+            return
+
+        marker_pen = pg.mkPen(color=(210, 70, 70), width=1, style=Qt.PenStyle.DashLine)
+        label_color = (210, 70, 70)
+
+        for ts, label in self.markers:
+            if t_start <= ts <= t_end:
+                # Parse JSON marker strings (e.g. {"start":"LEFT","stop":"BLINK"})
+                # into a short readable label, then escape { } so pyqtgraph's
+                # str.format() doesn't treat them as template placeholders.
+                display = self._format_marker_label(label)
+                safe = display.replace('{', '{{').replace('}', '}}')
+                line = pg.InfiniteLine(
+                    pos=ts,
+                    angle=90,
+                    pen=marker_pen,
+                    label=safe,
+                    labelOpts={'position': 0.97, 'color': label_color},
+                )
+                plot_ref.addItem(line)
+                self._marker_inf_lines.append(line)
+
+    def update_plot_overlay(self, set_y_range=True):
+        """Update plot in overlay mode - plots only visible data
+        
+        Args:
+            set_y_range: If True, update Y-axis bounds. Set to False when just changing windows.
+        """
+        # Clear existing plot items
+        self.overlay_plot_items.clear()
+        self.plot_widget.clear()
+        
+        if not self.active_channels:
+            return
+        
+        # Get current window bounds
+        start_sample, end_sample = self.get_window_bounds(self.current_window)
+        t_start = self.full_time_axis[start_sample]
+        t_end = self.full_time_axis[min(end_sample - 1, len(self.full_time_axis) - 1)]
+        
+        # Get visible data range with padding
+        view_range = [t_start, t_end]
+        start_idx, end_idx = self.get_visible_data_range(view_range)
+        
+        # Plot only visible data for each active channel
+        for ch_idx in sorted(self.active_channels):
+            data = self.raw_data[ch_idx, start_idx:end_idx]
+            time_slice = self.full_time_axis[start_idx:end_idx]
+            color = pg.mkColor(self.channel_colors[ch_idx % len(self.channel_colors)])
+
+            plot_item = self.plot_widget.plot(
+                time_slice,
+                data,
+                pen=pg.mkPen(color=color, width=2),
+                name=self.get_channel_name(ch_idx)
+            )
+            self.overlay_plot_items[ch_idx] = plot_item
+        
+        # Only set Y range when channels change, not on every window update
+        if set_y_range:
+            y_min, y_max = self.get_bounds_for_channels(self.active_channels)
+            self.plot_widget.setYRange(y_min, y_max)
+        
+        # Set X-axis range to show current window
+        self.plot_widget.setXRange(t_start, t_end)
+
+        self.plot_widget.addLegend()
+
+        # Draw marker lines for this window
+        self._draw_markers(self.plot_widget, t_start, t_end)
+
+    def on_overlay_range_changed(self):
+        """Called when user zooms or pans in overlay mode - updates visible data"""
+        if self.mode == 'stream' or self._skip_range_update:
+            return
+
+        if not self.file_loaded or not self.active_channels:
+            return
+
+        # Update window controls to match current view
+        self.update_window_controls_from_view()
+
+        # Get current view range
+        view_range = self.plot_widget.viewRange()[0]  # [x_min, x_max]
+        start_idx, end_idx = self.get_visible_data_range(view_range)
+
+        # Guard against empty slice (view scrolled past data boundary)
+        if start_idx >= end_idx:
+            return
+
+        # Update data for each active channel
+        for ch_idx in sorted(self.active_channels):
+            if ch_idx in self.overlay_plot_items:
+                data = self.raw_data[ch_idx, start_idx:end_idx]
+                time_slice = self.full_time_axis[start_idx:end_idx]
+                self.overlay_plot_items[ch_idx].setData(time_slice, data)
+
+        # Update marker lines to match the new visible range
+        self._draw_markers(self.plot_widget, view_range[0], view_range[1])
+
+    def update_plot_stacked(self, rebuild_layout=True):
+        """Update plots in stacked mode - mne-lsl style with vertical offsets.
+
+        Each channel is offset by -k * d, where d is auto-calculated spacing.
+        d = total_y_span / num_active, with d/2 padding from top and bottom edges.
+
+        Args:
+            rebuild_layout: If True, rebuild plot items (when channels change).
+                          If False, just update data (faster for navigation/zoom).
+        """
+        if not self.file_loaded or self.stacked_plot_item is None:
+            return
+
+        active_list = sorted(self.active_channels)
+        num_active = len(active_list)
+
+        if num_active == 0:
+            self.stacked_plot_item.clear()
+            self.stacked_plot_items.clear()
+            return
+
+        # Auto-calculate channel spacing
+        d = self.compute_channel_spacing(num_active)
+        self.yRange = d  # Keep yRange in sync for other code paths
+
+        # Get window time bounds
+        start_sample, end_sample = self.get_window_bounds(self.current_window)
+        t_start = self.full_time_axis[start_sample]
+        t_end = self.full_time_axis[min(end_sample - 1, len(self.full_time_axis) - 1)]
+
+        # Get visible data range
+        view_range = [t_start, t_end]
+        start_idx, end_idx = self.get_visible_data_range(view_range)
+
+        # Create time array for X-axis
+        time_slice = self.full_time_axis[start_idx:end_idx]
+
+        # Calculate vertical offsets: 0, -d, -2d, ...
+        offsets = np.arange(0, -num_active * d, -d)
+
+        # Vectorized: extract all channels and compute means in one numpy call
+        active_indices = np.array(active_list)
+        all_data = self.raw_data[active_indices, start_idx:end_idx]
+        all_means = np.mean(all_data, axis=1)
+
+        # Check if we need to rebuild (channels changed)
+        if rebuild_layout or self.active_channels != self.last_stacked_channels:
+            # Clear existing plot items
+            self.stacked_plot_item.clear()
+            self.stacked_plot_items.clear()
+
+            # Create plot items for each channel
+            for k, ch_idx in enumerate(active_list):
+                offset_data = (all_data[k] - all_means[k]) * self.channel_amplitude_scale + offsets[k]
+
+                # Get color for this channel
+                color = pg.mkColor(self.channel_colors[ch_idx % len(self.channel_colors)])
+
+                plot_item = self.stacked_plot_item.plot(
+                    time_slice,
+                    offset_data,
+                    pen=pg.mkPen(color=color, width=1.5),
+                )
+                # Enable auto-downsampling for performance with many channels
+                plot_item.setDownsampling(auto=True, method='peak')
+                plot_item.setClipToView(True)
+                self.stacked_plot_items[ch_idx] = plot_item
+
+            # Set Y-axis ticks to show channel labels
+            yticks = [
+                (-k * d, self.get_channel_name(ch_idx))
+                for k, ch_idx in enumerate(active_list)
+            ]
+            self.stacked_plot_item.getAxis('left').setTicks([yticks, []])
+
+            # Remember which channels are displayed
+            self.last_stacked_channels = self.active_channels.copy()
+
+        else:
+            # Just update data for existing plot items (fast path)
+            for k, ch_idx in enumerate(active_list):
+                if ch_idx in self.stacked_plot_items:
+                    offset_data = (all_data[k] - all_means[k]) * self.channel_amplitude_scale + offsets[k]
+                    self.stacked_plot_items[ch_idx].setData(time_slice, offset_data)
+
+            # Update Y-axis ticks (in case spacing changed)
+            yticks = [
+                (-k * d, self.get_channel_name(ch_idx))
+                for k, ch_idx in enumerate(active_list)
+            ]
+            self.stacked_plot_item.getAxis('left').setTicks([yticks, []])
+
+        # Update axis label with current scale
+        self.stacked_plot_item.setLabel('left', f'Scale: {d:.1f}')
+
+        # Set Y range: d/2 above topmost channel, d/2 below bottommost
+        y_top = d
+        y_bottom = -num_active * d
+        self.stacked_plot_item.setYRange(y_bottom, y_top, 0)
+
+        # Set X range to current window
+        self.stacked_plot_item.setXRange(t_start, t_end, 0)
+
+        # Draw marker lines for this window
+        self._draw_markers(self.stacked_plot_item, t_start, t_end)
+
+    def on_stacked_range_changed(self):
+        """Called when user pans in stacked mode - updates visible data"""
+        if self.mode == 'stream' or self._skip_range_update:
+            return
+
+        if not self.file_loaded or not self.active_channels or self.stacked_plot_item is None:
+            return
+
+        # Update window controls to match current view
+        self.update_window_controls_from_view()
+
+        # Get the X range from plot
+        view_range = self.stacked_plot_item.viewRange()[0]  # [x_min, x_max]
+        start_idx, end_idx = self.get_visible_data_range(view_range)
+
+        # Get time slice
+        time_slice = self.full_time_axis[start_idx:end_idx]
+
+        # Calculate offsets with auto-spacing
+        active_list = sorted(self.active_channels)
+        num_active = len(active_list)
+        d = self.compute_channel_spacing(num_active)
+        offsets = np.arange(0, -num_active * d, -d)
+
+        # Guard against empty slice (view scrolled past data boundary)
+        if start_idx >= end_idx:
+            return
+
+        # Vectorized: extract all channels and compute means in one numpy call
+        active_indices = np.array(active_list)
+        all_data = self.raw_data[active_indices, start_idx:end_idx]
+        all_means = np.mean(all_data, axis=1)
+
+        # Update data for all active channels
+        for k, ch_idx in enumerate(active_list):
+            if ch_idx in self.stacked_plot_items:
+                offset_data = (all_data[k] - all_means[k]) * self.channel_amplitude_scale + offsets[k]
+                self.stacked_plot_items[ch_idx].setData(time_slice, offset_data)
+
+        # Update marker lines to match the new visible range
+        self._draw_markers(self.stacked_plot_item, view_range[0], view_range[1])
+
+    def navigate_to_window(self, value):
+        """Navigate to a specific window and update the view
+
+        Args:
+            value: Window index to navigate to
+        """
+        # Skip in streaming mode (no window-based navigation)
+        if self.mode == 'stream':
+            return
+
+        # Stop autoplay if user manually navigates
+        if self.autoplay_active and self.autoplay_timer.isActive():
+            self.autoplay_timer.stop()
+            self.play_pause_btn.setText("▶ Play")
+        
+        self.current_window = value
+        
+        self.slider.setValue(value)
+        self.spinbox.setValue(value)
+        
+        self.info_label.setText(f"Window {value} / {self.num_windows-1}")
+        
+        # Snap to window boundaries
+        start_sample, end_sample = self.get_window_bounds(value)
+        t_start = self.full_time_axis[start_sample]
+        t_end = self.full_time_axis[min(end_sample - 1, len(self.full_time_axis) - 1)]
+        
+        # Set X-axis range to new window
+        if self.display_mode == 'overlay':
+            self.plot_widget.setXRange(t_start, t_end)
+        else:
+            if self.stacked_plot_item is not None:
+                self.stacked_plot_item.setXRange(t_start, t_end)
+        
+        # Update plot data and apply zoom
+        self.update_plot()
+
+        # Update FFT and band power for file mode
+        if self.file_loaded and not self.streaming_active:
+            self.calculate_fft_for_file()
+            self.calculate_band_power_for_file()
+    
+    def on_slider_changed(self, value):
+        """Handle slider movement"""
+        self.navigate_to_window(value)
+    
+    def on_spinbox_changed(self, value):
+        """Handle spinbox input"""
+        self.navigate_to_window(value)
+    
+    def prev_window(self):
+        """Go to previous window and snap to its boundaries"""
+        if self.current_window > 0:
+            self.spinbox.setValue(self.current_window - 1)
+    
+    def next_window(self):
+        """Go to next window and snap to its boundaries"""
+        if self.current_window < self.num_windows - 1:
+            self.spinbox.setValue(self.current_window + 1)
+    
+    def auto_fit_plot(self):
+        """Re-fit the plot to current window's IQR bounds and snap to window boundaries"""
+        if not self.file_loaded or not self.active_channels:
+            return
+        
+        # Reset vertical zoom slider to 100% (normal zoom)
+        self.vertical_zoom_slider.setValue(100)
+        
+        # Get window time bounds for current window
+        start_sample, end_sample = self.get_window_bounds(self.current_window)
+        t_start = self.full_time_axis[start_sample]
+        t_end = self.full_time_axis[min(end_sample - 1, len(self.full_time_axis) - 1)]
+        
+        # Get pre-calculated bounds based on current mode from channel with greatest range
+        y_min, y_max = self.get_bounds_for_channels(self.active_channels)
+        
+        if self.display_mode == 'overlay':
+            # Reset to show current window time range and bounds
+            self.plot_widget.setYRange(y_min, y_max)
+            self.plot_widget.setXRange(t_start, t_end)
+        else:
+            # Stacked mode: reset total_y_span and amplitude scale
+            if self.stacked_plot_item is not None:
+                self.total_y_span = 1600.0  # Reset to default
+                self.channel_amplitude_scale = 1.0
+                self.stacked_plot_item.setXRange(t_start, t_end)
+                num_active = len(self.active_channels)
+                d = self.compute_channel_spacing(num_active)
+                y_top = d
+                y_bottom = -num_active * d
+                self.stacked_plot_item.setYRange(y_bottom, y_top)
+
+    def on_spacebar(self):
+        """Handle spacebar: dispatches to file play/pause or streaming start/stop"""
+        if self.mode == 'stream':
+            self.toggle_streaming_visualization()
+        else:
+            self.toggle_play_pause()
+
+    def toggle_play_pause(self):
+        """Toggle play/pause - single button controls autoplay (file mode only)"""
+        if not self.file_loaded:
+            return
+
+        if self.autoplay_timer.isActive():
+            # Currently playing - pause it
+            self.autoplay_timer.stop()
+            self.play_pause_btn.setText("▶ Play")
+        else:
+            # Start or resume playing from current view position
+            self.autoplay_active = True
+            view_range = self.stacked_plot_item.viewRange()
+            self.autoplay_current_time = (view_range[0][0] + view_range[0][1]) / 2
+            self._last_frame_time = time.perf_counter()
+            self.autoplay_timer.start(33)
+            self.play_pause_btn.setText("⏸ Pause")
+    
+    def on_playback_speed_changed(self, value):
+        """Update playback speed"""
+        self.autoplay_speed = value
+    
+    def autoplay_step(self):
+        """Advance autoplay by one frame using real elapsed time"""
+        if not self.file_loaded or not self.autoplay_active or not self.active_channels:
+            return
+
+        # Use real elapsed time so playback stays at true speed regardless of frame rate
+        now = time.perf_counter()
+        elapsed = now - self._last_frame_time
+        self._last_frame_time = now
+
+        # Cap elapsed to avoid huge jumps (e.g. after window unfocus)
+        elapsed = min(elapsed, 0.1)
+
+        # Advance by real elapsed time × speed multiplier
+        time_increment = elapsed * self.autoplay_speed
+        self.autoplay_current_time += time_increment
+
+        # Get total duration
+        total_duration = self.full_time_axis[-1]
+
+        # Check if we've reached the end
+        if self.autoplay_current_time >= total_duration - self.window_size_sec / 2:
+            self.autoplay_current_time = self.window_size_sec / 2
+
+        # Calculate the view range centered on current time
+        half_window = self.window_size_sec / 2
+        t_start = self.autoplay_current_time - half_window
+        t_end = self.autoplay_current_time + half_window
+
+        # Clamp to valid range
+        if t_start < self.full_time_axis[0]:
+            t_start = self.full_time_axis[0]
+            t_end = t_start + self.window_size_sec
+        if t_end > self.full_time_axis[-1]:
+            t_end = self.full_time_axis[-1]
+            t_start = t_end - self.window_size_sec
+
+        # Block range-changed signals to prevent double data updates
+        self._skip_range_update = True
+
+        # Get visible data range
+        view_range = [t_start, t_end]
+        start_idx, end_idx = self.get_visible_data_range(view_range)
+        time_slice = self.full_time_axis[start_idx:end_idx]
+
+        # Suppress intermediate repaints while updating all curves
+        self.plot_widget.setUpdatesEnabled(False)
+
+        if self.display_mode == 'overlay':
+            self.plot_widget.setXRange(t_start, t_end)
+            for ch_idx in sorted(self.active_channels):
+                if ch_idx in self.overlay_plot_items:
+                    data = self.raw_data[ch_idx, start_idx:end_idx]
+                    self.overlay_plot_items[ch_idx].setData(time_slice, data)
+        else:
+            if self.stacked_plot_item is not None:
+                self.stacked_plot_item.setXRange(t_start, t_end)
+
+            active_list = sorted(self.active_channels)
+            num_active = len(active_list)
+            d = self.compute_channel_spacing(num_active)
+            offsets = np.arange(0, -num_active * d, -d)
+
+            # Vectorized: extract all channels and compute means in one numpy call
+            active_indices = np.array(active_list)
+            all_data = self.raw_data[active_indices, start_idx:end_idx]
+            all_means = np.mean(all_data, axis=1)
+
+            for k, ch_idx in enumerate(active_list):
+                if ch_idx in self.stacked_plot_items:
+                    offset_data = (all_data[k] - all_means[k]) * self.channel_amplitude_scale + offsets[k]
+                    self.stacked_plot_items[ch_idx].setData(time_slice, offset_data)
+
+        # Re-enable repaints and trigger a single redraw
+        self.plot_widget.setUpdatesEnabled(True)
+        self.plot_widget.update()
+
+        self._skip_range_update = False
+
+        # Update window controls to reflect current position
+        self.update_window_controls_from_view()
+
+        # Throttle FFT/band power updates (~3 Hz)
+        self.fft_update_counter += 1
+        if self.fft_update_counter >= 5:
+            self.fft_update_counter = 0
+            self.calculate_fft_for_file()
+            self.calculate_band_power_for_file()
+
+    def open_settings_dialog(self):
+        """Open dialog to configure application settings"""
+        dialog = SettingsDialog(self.display_mode, self.theme, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_mode = dialog.get_mode()
+            new_theme = dialog.get_theme()
+
+            # Handle theme change
+            if new_theme != self.theme:
+                self.theme = new_theme
+                self.apply_theme()
+
+            # Handle display mode change
+            if new_mode != self.display_mode:
+                self.display_mode = new_mode
+
+                # Rebuild plot layout
+                if self.display_mode == 'overlay':
+                    self.setup_overlay_mode()
+                else:
+                    self.setup_stacked_mode()
+
+                # Refresh plot (will automatically apply zoom)
+                self.update_plot()
+
+                print(f"Display mode changed to: {self.display_mode}")
+    
+    def on_mode_changed(self):
+        """Handle mode switching between file and streaming"""
+        if self.file_mode_radio.isChecked():
+            self.mode = 'file'
+            self.file_group.setEnabled(True)
+            self.stream_group.setEnabled(False)
+            self.signal_group.setEnabled(False)
+            # Show bottom navigation toolbar for file mode
+            self.nav_widget.setVisible(True)
+            # Restore play/pause for file mode
+            self.play_pause_btn.setEnabled(self.file_loaded)
+            self.play_pause_btn.setText("▶ Play")
+            # Enable speed control for file mode
+            self.playback_speed_spinbox.setEnabled(True)
+            # Enable horizontal scrolling for file mode
+            if hasattr(self, 'plot_widgets') and self.plot_widgets:
+                for pw in self.plot_widgets:
+                    if hasattr(pw, 'setMouseEnabled'):
+                        pw.setMouseEnabled(x=True, y=True)
+        else:
+            self.mode = 'stream'
+            self.file_group.setEnabled(False)
+            self.stream_group.setEnabled(True)
+            self.signal_group.setEnabled(True)
+            # Hide bottom navigation toolbar for streaming mode (window navigation not applicable)
+            self.nav_widget.setVisible(False)
+            # Switch play/pause button to streaming control
+            self.play_pause_btn.setEnabled(True)
+            self.play_pause_btn.setText("Start Streaming")
+            # Disable speed control in streaming mode (real-time only)
+            self.playback_speed_spinbox.setEnabled(False)
+            # Disable horizontal scrolling for streaming mode
+            if hasattr(self, 'plot_widgets') and self.plot_widgets:
+                for pw in self.plot_widgets:
+                    if hasattr(pw, 'setMouseEnabled'):
+                        pw.setMouseEnabled(x=False, y=False)
+
+    def auto_connect_headset(self):
+        """Auto-detect and connect to any EEG headset.
+
+        Priority:
+        1. Serial device found → try Cyton+Daisy (16ch/125Hz), then Cyton (8ch/250Hz)
+        2. No serial device   → offer LSL stream scan (Neurable, etc.) or synthetic board
+        """
+        self.connect_btn.setEnabled(False)
+        self.connect_btn.setText("Connecting...")
+
+        # ── BrainFlow serial path ──────────────────────────────────────────────
+        if BRAINFLOW_AVAILABLE and SERIAL_AVAILABLE:
+            serial_port = find_headset_port()
+            if serial_port is not None:
+                # Try Cyton+Daisy (16ch @ 125 Hz) first, fall back to Cyton (8ch @ 250 Hz)
+                for board_id in [BoardIds.CYTON_DAISY_BOARD.value,
+                                  BoardIds.CYTON_BOARD.value]:
+                    board = None
+                    try:
+                        params = BrainFlowInputParams()
+                        params.serial_port = serial_port
+                        BoardShim.enable_dev_board_logger()
+                        board = BoardShim(board_id, params)
+                        board.prepare_session()
+                        board.start_stream()
+                        self.board = board
+                        self.board_id = board_id
+                        self._finish_brainflow_connection()
+                        return
+                    except Exception as e:
+                        print(f"Board id {board_id} failed: {e}")
+                        if board is not None:
+                            try:
+                                board.release_session()
+                            except Exception:
+                                pass
+                QMessageBox.critical(
+                    self, "Connection Error",
+                    "Found a serial device but could not initialise it as "
+                    "Cyton+Daisy or plain Cyton.\n"
+                    "Check that the headset is powered on and the COM port is free."
+                )
+                self._reset_connect_btn()
+                return
+
+        # ── No serial device — offer LSL scan or synthetic ─────────────────────
+        msg = QMessageBox(self)
+        msg.setWindowTitle("No Serial Device Found")
+        msg.setText(
+            "No serial EEG device was detected.\n\n"
+            "• Scan LSL Streams — connect to any LSL EEG source\n"
+            "  (Neurable, OpenBCI GUI, BrainVision, etc.)\n\n"
+            "• Synthetic Board — simulated data for testing"
+        )
+        lsl_btn   = msg.addButton("Scan LSL Streams",  QMessageBox.ButtonRole.AcceptRole)
+        synth_btn = msg.addButton("Synthetic Board",   QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+
+        if clicked is lsl_btn:
+            self._reset_connect_btn()
+            self.scan_and_connect_lsl()
+            return
+
+        if clicked is synth_btn:
+            if not BRAINFLOW_AVAILABLE:
+                QMessageBox.critical(
+                    self, "Error",
+                    "BrainFlow is not installed — cannot use synthetic board.\n"
+                    "Install with: pip install brainflow"
+                )
+                self._reset_connect_btn()
+                return
+            try:
+                params = BrainFlowInputParams()
+                BoardShim.enable_dev_board_logger()
+                self.board = BoardShim(BoardIds.SYNTHETIC_BOARD.value, params)
+                self.board.prepare_session()
+                self.board.start_stream()
+                self.board_id = BoardIds.SYNTHETIC_BOARD.value
+                self._finish_brainflow_connection()
+            except Exception as e:
+                QMessageBox.critical(self, "Connection Error",
+                                     f"Failed to start synthetic board:\n{e}")
+                self._reset_connect_btn()
+            return
+
+        # Cancel
+        self._reset_connect_btn()
+
+    # ── connection helpers ─────────────────────────────────────────────────────
+
+    def _show_about_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("About")
+        dlg.setMinimumWidth(300)
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel("<b>Longhorn Neural Interface Platform</b>"))
+        layout.addWidget(QLabel(f"Version: {CURRENT_VERSION}"))
+        layout.addWidget(QLabel("© LonghornNeurotech"))
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        btns.accepted.connect(dlg.accept)
+        layout.addWidget(btns)
+        dlg.exec()
+
+    def _reset_connect_btn(self):
+        """Restore the connect button to its idle state."""
+        self.connect_btn.setEnabled(True)
+        self.connect_btn.setText("Auto-Connect Headset")
+
+    def _finish_brainflow_connection(self):
+        """Read metadata from BrainFlow and call _complete_connection."""
+        self.headset_source = 'brainflow'
+        self.eeg_channels  = BoardShim.get_eeg_channels(self.board_id)
+        self.num_channels  = len(self.eeg_channels)
+        self.sampling_rate = BoardShim.get_sampling_rate(self.board_id)
+        try:
+            self.channel_names = list(BoardShim.get_eeg_names(self.board_id))
+        except Exception:
+            self.channel_names = []
+        self._complete_connection()
+
+    def scan_and_connect_lsl(self):
+        """Discover LSL EEG streams on the network and let the user pick one."""
+        if not LSL_AVAILABLE:
+            QMessageBox.critical(
+                self, "Error",
+                "pylsl is not installed — cannot scan for LSL streams.\n"
+                "Install with: pip install pylsl"
+            )
+            return
+
+        self.connect_btn.setEnabled(False)
+        self.connect_btn.setText("Scanning LSL…")
+
+        try:
+            streams = resolve_byprop('type', 'EEG', timeout=4.0)
+        except Exception as e:
+            QMessageBox.critical(self, "LSL Scan Error",
+                                 f"Failed to scan for LSL streams:\n{e}")
+            self._reset_connect_btn()
+            return
+
+        if not streams:
+            QMessageBox.warning(
+                self, "No LSL Streams Found",
+                "No EEG LSL streams were found on the network.\n"
+                "Make sure the headset software is running and broadcasting LSL."
+            )
+            self._reset_connect_btn()
+            return
+
+        # Stream picker dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Select LSL EEG Stream")
+        dlg.setMinimumWidth(460)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("Available EEG streams:"))
+        combo = QComboBox()
+        for s in streams:
+            sr = s.nominal_srate()
+            sr_str = f"{sr:.1f}" if sr > 0 else "irregular"
+            combo.addItem(
+                f"{s.name()}  [{s.channel_count()} ch @ {sr_str} Hz]"
+                f"  — {s.hostname()}"
+            )
+        layout.addWidget(combo)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self._reset_connect_btn()
+            return
+
+        chosen = streams[combo.currentIndex()]
+        try:
+            inlet = StreamInlet(chosen, max_buflen=30)
+            info  = inlet.info(timeout=5.0)
+
+            self.lsl_inlet      = inlet
+            self.headset_source = 'lsl_inlet'
+            self.board          = None
+            self.board_id       = None
+            self.eeg_channels   = None
+            self.num_channels   = info.channel_count()
+            sr = info.nominal_srate()
+            self.sampling_rate  = int(sr) if sr > 0 else 250
+
+            # Parse per-channel labels from stream XML descriptor
+            ch_names = []
+            ch_node = info.desc().child("channels").child("channel")
+            for _ in range(self.num_channels):
+                label = ch_node.child_value("label")
+                ch_names.append(label if label else "")
+                ch_node = ch_node.next_sibling()
+            self.channel_names = [
+                name if name else f"Ch{i + 1}"
+                for i, name in enumerate(ch_names)
+            ]
+            self._complete_connection()
+        except Exception as e:
+            QMessageBox.critical(self, "LSL Connect Error",
+                                 f"Failed to open LSL inlet:\n{e}")
+            self._reset_connect_btn()
+
+    def _complete_connection(self):
+        """Shared UI and state setup after any successful headset connection."""
+        buffer_size = int(self.sampling_rate * self.window_size_sec)
+        self.stream_buffer    = np.zeros((self.num_channels, buffer_size))
+        self.stream_time_axis = np.arange(buffer_size) / self.sampling_rate
+
+        self.calculate_filter_coefficients()
+
+        self.sampling_rate_spinbox.blockSignals(True)
+        self.sampling_rate_spinbox.setValue(self.sampling_rate)
+        self.sampling_rate_spinbox.blockSignals(False)
+        self.sampling_rate_spinbox.setEnabled(False)
+
+        if self.headset_source == 'lsl_inlet':
+            status = (f"Connected via LSL: {self.num_channels} ch "
+                      f"@ {self.sampling_rate} Hz")
+        else:
+            board_label = ""
+            if BRAINFLOW_AVAILABLE and self.board_id is not None:
+                board_label = {
+                    BoardIds.CYTON_BOARD.value:       "Cyton 8ch",
+                    BoardIds.CYTON_DAISY_BOARD.value: "Cyton+Daisy 16ch",
+                    BoardIds.SYNTHETIC_BOARD.value:   "Synthetic",
+                }.get(self.board_id, f"Board {self.board_id}")
+            status = (f"Connected ({board_label}): "
+                      f"{self.num_channels} ch @ {self.sampling_rate} Hz")
+
+        self.connection_status.setText(status)
+        self.connection_status.setStyleSheet("color: green;")
+        self.connect_btn.setText("Disconnect")
+        self.connect_btn.clicked.disconnect()
+        self.connect_btn.clicked.connect(self.disconnect_headset)
+        self.connect_btn.setEnabled(True)
+
+        self.start_eeg_stream_btn.setEnabled(True)
+        self.start_marker_stream_btn.setEnabled(True)
+        self.start_viz_btn.setEnabled(True)
+        self.start_recording_btn.setEnabled(True)
+        self.task_launcher_btn.setEnabled(True)
+
+        self.setup_streaming_channels()
+
+        # Start data pump at 60 Hz regardless of visualization state
+        self.stream_timer.start(16)
+
+        ch_preview = ', '.join(self.channel_names[:8])
+        if len(self.channel_names) > 8:
+            ch_preview += f", … (+{len(self.channel_names) - 8} more)"
+        QMessageBox.information(
+            self, "Headset Connected",
+            f"{status}\nChannels: {ch_preview}"
+        )
+
+    def disconnect_headset(self):
+        """Disconnect from headset (BrainFlow or LSL inlet)."""
+        try:
+            if self.streaming_active:
+                self.toggle_streaming_visualization()
+
+            # Stop the data pump before releasing the source
+            self.stream_timer.stop()
+
+            # BrainFlow board
+            if self.board is not None:
+                self.board.stop_stream()
+                self.board.release_session()
+                self.board = None
+
+            # LSL inlet
+            if self.lsl_inlet is not None:
+                self.lsl_inlet.close_stream()
+                self.lsl_inlet = None
+
+            self.headset_source = None
+            self.channel_names  = []
+            self.num_channels   = 0
+
+            if self.eeg_outlet is not None:
+                del self.eeg_outlet
+                self.eeg_outlet = None
+
+            if self.marker_outlet is not None:
+                del self.marker_outlet
+                self.marker_outlet = None
+
+            self.connection_status.setText("Not connected")
+            self.connection_status.setStyleSheet("color: red;")
+            self.connect_btn.setText("Auto-Connect Headset")
+            self.connect_btn.clicked.disconnect()
+            self.connect_btn.clicked.connect(self.auto_connect_headset)
+
+            self.start_eeg_stream_btn.setEnabled(False)
+            self.start_marker_stream_btn.setEnabled(False)
+            self.start_viz_btn.setEnabled(False)
+            self.start_recording_btn.setEnabled(False)
+            self.start_recording_btn.setText("Start Recording")
+            self.start_recording_btn.setStyleSheet("")
+            self.task_launcher_btn.setEnabled(False)
+
+            self.eeg_stream_status.setText("EEG Stream: Inactive")
+            self.eeg_stream_status.setStyleSheet("color: gray;")
+            self.marker_stream_status.setText("Marker Stream: Inactive")
+            self.marker_stream_status.setStyleSheet("color: gray;")
+
+            # Re-enable sampling rate editing
+            self.sampling_rate_spinbox.setEnabled(True)
+
+        except Exception as e:
+            QMessageBox.warning(self, "Warning", f"Error during disconnect:\n{str(e)}")
+
+    def setup_streaming_channels(self):
+        """Setup channel checkboxes for streaming mode"""
+        self.channel_dropdown_menu.clear()
+        self.channel_checkboxes = []
+        self.active_channels.clear()
+
+        for i in range(self.num_channels):
+            cb = QCheckBox(self.get_channel_name(i))
+            cb.stateChanged.connect(lambda state, ch=i: self.toggle_channel(ch, state))
+            self.channel_checkboxes.append(cb)
+
+            # Add checkbox to menu
+            action = QWidgetAction(self.channel_dropdown_menu)
+            action.setDefaultWidget(cb)
+            self.channel_dropdown_menu.addAction(action)
+
+        # Enable channel group
+        self.channel_group.setEnabled(True)
+
+        # Select all channels by default.
+        # Force a False→True transition so stateChanged always fires even if
+        # the checkbox was already True from a previous connection.
+        self.select_all_checkbox.blockSignals(True)
+        self.select_all_checkbox.setChecked(False)
+        self.select_all_checkbox.blockSignals(False)
+        self.select_all_checkbox.setChecked(True)
+
+    def start_eeg_stream(self):
+        """Start LSL EEG stream"""
+        if not LSL_AVAILABLE:
+            QMessageBox.critical(self, "Error", "pylsl is not installed.\nInstall with: pip install pylsl")
+            return
+
+        if self.eeg_outlet is not None:
+            QMessageBox.information(self, "Info", "EEG stream already active")
+            return
+
+        try:
+            # Get patient ID
+            self.patient_id = self.patient_id_input.text().strip()
+            if not self.patient_id:
+                QMessageBox.warning(self, "Warning", "Please enter a Patient ID")
+                return
+
+            self.trial_number = self.trial_spinbox.value()
+
+            # Create stream name with auto-naming
+            stream_name = f"EEG_{self.patient_id}_Trial{self.trial_number:04d}"
+
+            # Create LSL stream info
+            info = StreamInfo(
+                name=stream_name,
+                type='EEG',
+                channel_count=self.num_channels,
+                nominal_srate=self.sampling_rate,
+                channel_format=cf_float32,
+                source_id=f'eeg_headset_{self.patient_id}'
+            )
+
+            # Create outlet
+            self.eeg_outlet = StreamOutlet(info)
+
+            self.eeg_stream_status.setText(f"EEG Stream: Active - {stream_name}")
+            self.eeg_stream_status.setStyleSheet("color: green; font-weight: bold;")
+            self.start_eeg_stream_btn.setText("Stop EEG Stream")
+            self.start_eeg_stream_btn.clicked.disconnect()
+            self.start_eeg_stream_btn.clicked.connect(self.stop_eeg_stream)
+
+            print(f"LSL EEG Stream started: {stream_name}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to start EEG stream:\n{str(e)}")
+
+    def stop_eeg_stream(self):
+        """Stop LSL EEG stream"""
+        if self.eeg_outlet is not None:
+            del self.eeg_outlet
+            self.eeg_outlet = None
+
+        self.eeg_stream_status.setText("EEG Stream: Inactive")
+        self.eeg_stream_status.setStyleSheet("color: gray;")
+        self.start_eeg_stream_btn.setText("Start EEG Stream")
+        self.start_eeg_stream_btn.clicked.disconnect()
+        self.start_eeg_stream_btn.clicked.connect(self.start_eeg_stream)
+
+    def start_marker_stream(self):
+        """Start LSL Marker stream"""
+        if not LSL_AVAILABLE:
+            QMessageBox.critical(self, "Error", "pylsl is not installed.\nInstall with: pip install pylsl")
+            return
+
+        if self.marker_outlet is not None:
+            QMessageBox.information(self, "Info", "Marker stream already active")
+            return
+
+        try:
+            # Get patient ID
+            self.patient_id = self.patient_id_input.text().strip()
+            if not self.patient_id:
+                QMessageBox.warning(self, "Warning", "Please enter a Patient ID")
+                return
+
+            self.trial_number = self.trial_spinbox.value()
+
+            # Create stream name with auto-naming
+            stream_name = f"Markers_{self.patient_id}_Trial{self.trial_number:04d}"
+
+            # Create LSL stream info for markers
+            info = StreamInfo(
+                name=stream_name,
+                type='Markers',
+                channel_count=1,
+                nominal_srate=0,  # Irregular rate for markers
+                channel_format=cf_string,
+                source_id=f'markers_{self.patient_id}'
+            )
+
+            # Create outlet
+            self.marker_outlet = StreamOutlet(info)
+
+            self.marker_stream_status.setText(f"Marker Stream: Active - {stream_name}")
+            self.marker_stream_status.setStyleSheet("color: green; font-weight: bold;")
+            self.start_marker_stream_btn.setText("Stop Marker Stream")
+            self.start_marker_stream_btn.clicked.disconnect()
+            self.start_marker_stream_btn.clicked.connect(self.stop_marker_stream)
+
+            print(f"LSL Marker Stream started: {stream_name}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to start marker stream:\n{str(e)}")
+
+    def stop_marker_stream(self):
+        """Stop LSL Marker stream"""
+        if self.marker_outlet is not None:
+            del self.marker_outlet
+            self.marker_outlet = None
+
+        self.marker_stream_status.setText("Marker Stream: Inactive")
+        self.marker_stream_status.setStyleSheet("color: gray;")
+        self.start_marker_stream_btn.setText("Start Marker Stream")
+        self.start_marker_stream_btn.clicked.disconnect()
+        self.start_marker_stream_btn.clicked.connect(self.start_marker_stream)
+
+    # ------------------------------------------------------------------ XDF recording
+
+    def _next_xdf_counter(self, patient_id):
+        """Return the next auto-incrementing counter for patient_id (persisted to disk)."""
+        counter_file = os.path.join(self.xdf_save_dir, '.xdf_counter.json')
+        counters = {}
+        if os.path.exists(counter_file):
+            try:
+                with open(counter_file, 'r') as f:
+                    counters = json.load(f)
+            except Exception:
+                pass
+        n = counters.get(patient_id, 0) + 1
+        counters[patient_id] = n
+        try:
+            os.makedirs(self.xdf_save_dir, exist_ok=True)
+            with open(counter_file, 'w') as f:
+                json.dump(counters, f)
+        except Exception as e:
+            print(f"[XDF] Warning: could not persist counter: {e}")
+        return n
+
+    def start_xdf_recording(self, patient_id):
+        """Begin XDF recording of EEG + Marker LSL streams."""
+        if self.xdf_recorder is not None:
+            print("[XDF] Recording already in progress; ignoring duplicate start.")
+            return
+
+        os.makedirs(self.xdf_save_dir, exist_ok=True)
+        counter = self._next_xdf_counter(patient_id)
+        filepath = os.path.join(self.xdf_save_dir, f"{patient_id}_{counter:04d}.xdf")
+
+        eeg_name = f"EEG_{patient_id}_Trial{self.trial_number:04d}"
+        mk_name  = f"Markers_{patient_id}_Trial{self.trial_number:04d}"
+        ch_names = (self.channel_names if self.channel_names
+                    else [self.get_channel_name(i) for i in range(self.num_channels)])
+
+        self.xdf_recorder = XDFRecorder(
+            filepath=filepath,
+            eeg_stream_name=eeg_name,
+            marker_stream_name=mk_name,
+            num_channels=self.num_channels,
+            srate=self.sampling_rate,
+            channel_names=ch_names,
+        )
+        self.xdf_recorder.start()
+
+        # Flush any markers that arrived before the recorder was ready
+        if self._pending_markers:
+            for ts, val in self._pending_markers:
+                self.xdf_recorder.push_marker(ts, val)
+            print(f"[XDF] Flushed {len(self._pending_markers)} buffered marker(s)")
+            self._pending_markers.clear()
+
+    def stop_xdf_recording(self):
+        """Finalise and save the XDF file."""
+        if self.xdf_recorder is not None:
+            self.xdf_recorder.stop()
+            self.xdf_recorder = None
+        # Reset the manual recording button regardless of who triggered the stop
+        if hasattr(self, 'start_recording_btn'):
+            self.start_recording_btn.setText("Start Recording")
+            self.start_recording_btn.setStyleSheet("")
+
+    def toggle_manual_recording(self):
+        """Start or stop a manual XDF recording from the main UI button."""
+        if self.xdf_recorder is not None:
+            # Currently recording — stop and auto-advance trial number
+            self.stop_xdf_recording()
+            self.trial_spinbox.setValue(self.trial_spinbox.value() + 1)
+            return
+
+        # --- Sync patient ID from the input widget ---
+        input_id = self.patient_id_input.text().strip()
+        if input_id:
+            self.patient_id = input_id
+
+        # Ask for patient ID only if still unknown
+        if not self.patient_id:
+            patient_id, ok = QInputDialog.getText(
+                self, "Patient ID", "Enter subject / patient ID:", text="SUB_001"
+            )
+            if not ok or not patient_id.strip():
+                return
+            self.patient_id = patient_id.strip()
+            self.patient_id_input.setText(self.patient_id)
+
+        # Ask for save directory only the first time (or if the default path doesn't exist)
+        if not self._xdf_save_dir_confirmed:
+            chosen_dir = QFileDialog.getExistingDirectory(
+                self, "Choose XDF Save Folder", self.xdf_save_dir
+            )
+            if not chosen_dir:
+                return
+            self.xdf_save_dir = chosen_dir
+            self._xdf_save_dir_confirmed = True
+
+        # Read the live trial number from the spinbox
+        self.trial_number = self.trial_spinbox.value()
+
+        # --- Start recording ---
+        self.start_xdf_recording(self.patient_id)
+
+        # Update button to show active state
+        self.start_recording_btn.setText("Stop Recording")
+        self.start_recording_btn.setStyleSheet("background-color: #f44336; color: white;")
+
+    def toggle_streaming_visualization(self):
+        """Start or stop real-time visualization"""
+        if not self.streaming_active:
+            # Start streaming visualization
+            self.streaming_active = True
+            self.stream_first_update = True  # Flag for initial auto-range
+            self.stream_start_time = local_clock() if LSL_AVAILABLE else 0
+            # stream_timer already running from connect; no restart needed
+            self.start_viz_btn.setText("Stop Visualization")
+            self.start_viz_btn.setStyleSheet("background-color: #f44336; color: white;")
+            self.play_pause_btn.setText("Stop Streaming")
+
+            # Clear all plots and reset references BEFORE starting new visualization
+            # This ensures old data is cleared only when new data is about to replace it
+            if hasattr(self, 'plot_widget') and self.plot_widget is not None:
+                self.plot_widget.clear()
+            if hasattr(self, 'fft_plot_widget') and self.fft_plot_widget is not None:
+                self.fft_plot_widget.clear()
+            if hasattr(self, 'band_power_plot_widget') and self.band_power_plot_widget is not None:
+                self.band_power_plot_widget.clear()
+            self.streaming_plot_items.clear()
+            self.fft_plot_items.clear()
+            self.band_power_bar_item = None
+            self.smoothed_fft.clear()
+            self.smoothed_band_power.clear()
+            self.band_power_y_max = 0.0
+            # Reset filter states for fresh start
+            self.bandpass_zi.clear()
+            self.notch_zi.clear()
+            # Fill buffer with NaN so unfilled regions aren't drawn
+            # (avoids zero-to-data boundary that causes filter transient spikes)
+            if self.stream_buffer is not None:
+                self.stream_buffer[:] = np.nan
+            # Drain any stale accumulated data from the board
+            if self.board is not None:
+                self.board.get_board_data()
+            # Discard the first 0.5s of filtered data (filter startup transient)
+            self.stream_warmup_remaining = int(self.sampling_rate * 0.5)
+
+            # Setup visualization
+            self.file_loaded = True
+            self.current_filename = "Live Stream"
+            self.setWindowTitle("Longhorn Neural Interface Platform - Live Streaming")
+
+            # Setup plot based on current display mode
+            if self.display_mode == 'overlay':
+                self.setup_overlay_mode()
+            else:
+                self.setup_stacked_mode()
+
+            # Disable horizontal scrolling for streaming mode
+            if hasattr(self, 'plot_widgets') and self.plot_widgets:
+                for pw in self.plot_widgets:
+                    if hasattr(pw, 'setMouseEnabled'):
+                        pw.setMouseEnabled(x=False, y=False)
+
+            # Enable controls
+            self.vertical_zoom_slider.setEnabled(True)
+            self.vertical_zoom_spinbox.setEnabled(True)
+            self.bounds_mode_combo.setEnabled(True)
+            self.horizontal_zoom_slider.setEnabled(True)
+            self.window_size_spinbox.setEnabled(True)
+
+            # Disable mode switching while streaming is active
+            self.file_mode_radio.setEnabled(False)
+            self.stream_mode_radio.setEnabled(False)
+
+        else:
+            # Stop streaming visualization
+            # Keep graphs visible - they will be cleared when new visualization starts
+            self.streaming_active = False
+            # stream_timer keeps running to continue draining board for LSL/XDF
+            self.start_viz_btn.setText("Start Visualization")
+            self.start_viz_btn.setStyleSheet("")
+            self.play_pause_btn.setText("Start Streaming")
+            self.file_loaded = False
+
+            # Re-enable mode switching
+            self.file_mode_radio.setEnabled(True)
+            self.stream_mode_radio.setEnabled(True)
+
+    def resize_stream_buffer(self, new_window_sec):
+        """Resize the streaming buffer when the user changes window length"""
+        new_buf_size = int(self.sampling_rate * new_window_sec)
+        if new_buf_size < 10:
+            new_buf_size = 10
+        old_buf = self.stream_buffer
+        old_size = old_buf.shape[1]
+
+        # Use NaN for unfilled regions so they aren't drawn (connect='finite')
+        new_buf = np.full((self.num_channels, new_buf_size), np.nan)
+        # Copy as much old data as fits, aligned to the right
+        copy_len = min(old_size, new_buf_size)
+        new_buf[:, -copy_len:] = old_buf[:, -copy_len:]
+
+        self.stream_buffer = new_buf
+        self.stream_time_axis = np.arange(new_buf_size) / self.sampling_rate
+        self.raw_data = self.stream_buffer
+        self.num_samples = new_buf_size
+
+        # Reset smoothing buffers since FFT size changes with buffer size
+        self.smoothed_fft.clear()
+        if hasattr(self, 'fft_plot_items'):
+            self.fft_plot_items.clear()
+        if hasattr(self, 'fft_plot_widget') and self.fft_plot_widget is not None:
+            self.fft_plot_widget.clear()
+
+        # Force plot items to rebuild with new time axis
+        self.streaming_plot_items.clear()
+        if self.display_mode == 'stacked' and hasattr(self, 'stacked_plot_item') and self.stacked_plot_item is not None:
+            self.stacked_plot_item.clear()
+        elif hasattr(self, 'plot_widget') and self.plot_widget is not None:
+            self.plot_widget.clear()
+
+    def update_stream_data(self):
+        """Drain EEG source, push to LSL/XDF, and (when active) update visualization."""
+        if self.board is None and self.lsl_inlet is None:
+            return
+
+        try:
+            # ── Acquire new samples ────────────────────────────────────────────
+            if self.headset_source == 'lsl_inlet':
+                samples, timestamps_lsl = self.lsl_inlet.pull_chunk(
+                    timeout=0.0, max_samples=512
+                )
+                if not samples:
+                    return
+                eeg_data = np.array(samples, dtype=np.float64).T  # (ch, samples)
+                if eeg_data.shape[0] != self.num_channels:
+                    return  # Unexpected channel count — skip
+
+                # --- Always push raw data to LSL and XDF ---
+                eeg_list = eeg_data.T.tolist()  # compute once; reused below
+                if self.eeg_outlet is not None and LSL_AVAILABLE:
+                    self.eeg_outlet.push_chunk(eeg_list)
+                if self.xdf_recorder is not None:
+                    ts_list = timestamps_lsl if timestamps_lsl else (
+                        [time.time()] * eeg_data.shape[1])
+                    self.xdf_recorder.push_eeg(ts_list, eeg_list)
+
+            else:
+                # BrainFlow board
+                data = self.board.get_board_data()
+                if data.shape[1] == 0:
+                    return  # No new data
+                eeg_data = data[self.eeg_channels, :]
+
+                # --- Always push raw data to LSL and XDF ---
+                eeg_list = eeg_data.T.tolist()  # compute once; reused below
+                if self.eeg_outlet is not None and LSL_AVAILABLE:
+                    self.eeg_outlet.push_chunk(eeg_list)
+                if self.xdf_recorder is not None and BRAINFLOW_AVAILABLE:
+                    ts_ch = BoardShim.get_timestamp_channel(self.board_id)
+                    timestamps = data[ts_ch, :].tolist()
+                    self.xdf_recorder.push_eeg(timestamps, eeg_list)
+
+            # --- Everything below is visualization-only ---
+            if not self.streaming_active:
+                return
+
+            # Apply signal processing (bandpass, notch with stateful filters)
+            processed_data = self.process_signal(eeg_data)
+
+            # Discard initial samples while filters settle (avoids startup transient spike)
+            if self.stream_warmup_remaining > 0:
+                n = processed_data.shape[1]
+                self.stream_warmup_remaining -= n
+                if self.stream_warmup_remaining >= 0:
+                    return  # Still warming up, discard entirely
+                # Warmup just finished - keep only the post-warmup tail
+                keep = -self.stream_warmup_remaining
+                processed_data = processed_data[:, -keep:]
+                self.stream_warmup_remaining = 0
+
+            # Rolling buffer: shift left, append new data on right
+            new_samples = processed_data.shape[1]
+            if new_samples > 0:
+                buf_len = self.stream_buffer.shape[1]
+                if new_samples >= buf_len:
+                    self.stream_buffer = processed_data[:, -buf_len:]
+                else:
+                    self.stream_buffer[:, :-new_samples] = self.stream_buffer[:, new_samples:]
+                    self.stream_buffer[:, -new_samples:] = processed_data
+
+                self.raw_data = self.stream_buffer
+                self.num_samples = buf_len
+
+                # Update plots (every frame for smooth time-domain display)
+                self.update_streaming_plots()
+
+                # Throttle FFT and band power updates (expensive, ~20Hz is enough)
+                self.fft_update_counter += 1
+                if self.fft_update_counter >= self.fft_update_interval:
+                    self.fft_update_counter = 0
+                    self.update_fft()
+                    self.update_band_power()
+
+        except Exception as e:
+            print(f"Error updating stream: {str(e)}")
+            # If the LSL inlet dropped, stop cleanly and notify the user
+            if self.headset_source == 'lsl_inlet' and self.streaming_active:
+                self.stream_timer.stop()
+                self.streaming_active = False
+                self.start_viz_btn.setText("Start Visualization")
+                self.start_viz_btn.setStyleSheet("")
+                self.play_pause_btn.setText("Start Streaming")
+                self.file_mode_radio.setEnabled(True)
+                self.stream_mode_radio.setEnabled(True)
+                msg = (f"Lost connection to LSL inlet:\n{e}\n\n"
+                       "Reconnect the headset and press 'Auto-Connect Headset' again.")
+                QTimer.singleShot(0, lambda m=msg: QMessageBox.warning(
+                    self, "LSL Stream Lost", m
+                ))
+
+    def calculate_filter_coefficients(self):
+        """Pre-calculate filter coefficients for efficient signal processing"""
+        if not SCIPY_AVAILABLE:
+            self.filter_coeffs_valid = False
+            return
+
+        try:
+            # Bandpass filter coefficients (5-35 Hz)
+            self.bandpass_b, self.bandpass_a = butter(
+                2, [self.lowcut, self.highcut], btype='band', fs=self.sampling_rate
+            )
+            # Notch filter coefficients (60 Hz)
+            self.notch_b, self.notch_a = iirnotch(self.notch_freq, 30, fs=self.sampling_rate)
+            # Compute initial filter state templates for stateful filtering
+            self.bandpass_zi_template = lfilter_zi(self.bandpass_b, self.bandpass_a)
+            self.notch_zi_template = lfilter_zi(self.notch_b, self.notch_a)
+            # Reset per-channel states so they get re-initialized on next data
+            self.bandpass_zi.clear()
+            self.notch_zi.clear()
+            self.filter_coeffs_valid = True
+        except Exception as e:
+            print(f"Error calculating filter coefficients: {e}")
+            self.filter_coeffs_valid = False
+
+    def process_signal(self, data):
+        """Apply signal processing to raw data using stateful filters for seamless streaming"""
+        processed = np.zeros_like(data)
+
+        for i in range(data.shape[0]):
+            channel_data = data[i, :].copy()
+
+            # Use pre-calculated filter coefficients with persistent state
+            if SCIPY_AVAILABLE and self.filter_coeffs_valid:
+                try:
+                    # Initialize filter states for this channel if needed
+                    if i not in self.bandpass_zi:
+                        self.bandpass_zi[i] = self.bandpass_zi_template * channel_data[0]
+                    if i not in self.notch_zi:
+                        self.notch_zi[i] = self.notch_zi_template * channel_data[0]
+
+                    # Bandpass filter with persistent state
+                    channel_data, self.bandpass_zi[i] = lfilter(
+                        self.bandpass_b, self.bandpass_a, channel_data, zi=self.bandpass_zi[i]
+                    )
+                    # Notch filter with persistent state
+                    channel_data, self.notch_zi[i] = lfilter(
+                        self.notch_b, self.notch_a, channel_data, zi=self.notch_zi[i]
+                    )
+                except:
+                    pass  # Skip if not enough data
+
+            # Apply magnitude scaling
+            channel_data = channel_data * (self.magnitude_scale / 100.0)
+
+            processed[i, :] = channel_data
+
+        return processed
+
+    def smooth_display_data(self, data):
+        """Apply display smoothing to a channel's rolling buffer.
+
+        Two modes controlled by self.smooth_type:
+          'Box Filter' — uniform moving average; self.smooth_seconds = window in seconds (10–500 ms)
+          'EMA'        — causal exponential moving average; self.smooth_seconds = alpha (0.05–0.95)
+
+        NaN handling: NaN gaps are filled via interpolation before the box filter
+        (eliminates the zero-boundary artifact), then restored afterwards.
+        For EMA the filter simply starts from the first valid sample.
+        """
+        if not self.smoothing_enabled:
+            return data
+        nan_mask = np.isnan(data)
+        if np.all(nan_mask):
+            return data
+
+        if self.smooth_type == 'EMA':
+            alpha = float(np.clip(self.smooth_seconds, 0.05, 0.95))
+            out = data.copy()
+            first_valid = int(np.argmax(~nan_mask))
+            if nan_mask[first_valid]:  # all-NaN guard
+                return data
+            prev = data[first_valid]
+            for i in range(valid_idx[0], len(data)):
+                if nan_mask[i]:
+                    out[i] = np.nan
+                else:
+                    prev = alpha * data[i] + (1.0 - alpha) * prev
+                    out[i] = prev
+            return out
+
+        else:  # Box Filter
+            if not SCIPY_AVAILABLE:
+                return data
+            win = max(1, int(self.smooth_seconds * self.sampling_rate))
+            if win <= 1:
+                return data
+            out = data.copy()
+            if nan_mask.any():
+                idx = np.arange(len(out))
+                valid = ~nan_mask
+                if valid.any():
+                    out = np.interp(idx, idx[valid], out[valid])
+                else:
+                    return data
+            out = uniform_filter1d(out, size=win, mode='nearest')
+            out[nan_mask] = np.nan
+            return out
+
+    def update_streaming_plots(self):
+        """Update plot widgets with streaming data - applies OpenBCI-style smoothing at display time"""
+        if not self.active_channels:
+            if hasattr(self, 'plot_widget') and self.plot_widget is not None:
+                if self.display_mode == 'stacked' and self.stacked_plot_item is not None:
+                    self.stacked_plot_item.clear()
+                else:
+                    self.plot_widget.clear()
+                self.streaming_plot_items.clear()
+            return
+
+        active_list = sorted(self.active_channels)
+        num_active = len(active_list)
+
+        # Use stacked mode or overlay mode
+        if self.display_mode == 'stacked' and self.stacked_plot_item is not None:
+            # Auto-calculate channel spacing
+            d = self.compute_channel_spacing(num_active)
+            self.yRange = d  # Keep in sync
+            offsets = np.arange(0, -num_active * d, -d)
+
+            # Check if active channels match current plot items
+            current_plotted_channels = set(self.streaming_plot_items.keys())
+            if current_plotted_channels != self.active_channels:
+                self.stacked_plot_item.clear()
+                self.streaming_plot_items.clear()
+
+                # Create plot items for each channel
+                for k, ch_idx in enumerate(active_list):
+                    if ch_idx < self.num_channels:
+                        data = self.smooth_display_data(self.stream_buffer[ch_idx, :])
+                        offset_data = (data - np.nanmean(data)) * self.channel_amplitude_scale + offsets[k]
+                        color = pg.mkColor(self.channel_colors[ch_idx % len(self.channel_colors)])
+
+                        plot_item = self.stacked_plot_item.plot(
+                            self.stream_time_axis,
+                            offset_data,
+                            pen=pg.mkPen(color=color, width=1.5),
+                            connect='finite',
+                        )
+                        self.streaming_plot_items[ch_idx] = plot_item
+
+                # Set Y-axis ticks with channel labels
+                yticks = [(-k * d, self.get_channel_name(ch_idx)) for k, ch_idx in enumerate(active_list)]
+                self.stacked_plot_item.getAxis('left').setTicks([yticks, []])
+
+                # Set Y range: one full gap above topmost, one below bottommost
+                y_top = d
+                y_bottom = -num_active * d
+                self.stacked_plot_item.setYRange(y_bottom, y_top)
+
+            else:
+                # Just update data (fast path)
+                for k, ch_idx in enumerate(active_list):
+                    if ch_idx in self.streaming_plot_items and ch_idx < self.num_channels:
+                        data = self.smooth_display_data(self.stream_buffer[ch_idx, :])
+                        offset_data = (data - np.nanmean(data)) * self.channel_amplitude_scale + offsets[k]
+                        self.streaming_plot_items[ch_idx].setData(self.stream_time_axis, offset_data)
+
+            # Update scale label and fix X range to full buffer window
+            self.stacked_plot_item.setLabel('left', f'Scale: {d:.1f}')
+            self.stacked_plot_item.setXRange(0, self.stream_time_axis[-1])
+
+        elif hasattr(self, 'plot_widget') and self.plot_widget is not None:
+            # Overlay mode (original behavior)
+            current_plotted_channels = set(self.streaming_plot_items.keys())
+
+            if current_plotted_channels != self.active_channels:
+                self.plot_widget.clear()
+                self.streaming_plot_items.clear()
+
+            for ch_idx in active_list:
+                if ch_idx < self.num_channels:
+                    data = self.smooth_display_data(self.stream_buffer[ch_idx, :])
+                    color = pg.mkColor(self.channel_colors[ch_idx % len(self.channel_colors)])
+
+                    if ch_idx in self.streaming_plot_items:
+                        self.streaming_plot_items[ch_idx].setData(self.stream_time_axis, data)
+                    else:
+                        plot_item = self.plot_widget.plot(
+                            self.stream_time_axis,
+                            data,
+                            pen=pg.mkPen(color=color, width=2),
+                            name=self.get_channel_name(ch_idx),
+                            connect='finite',
+                        )
+                        self.streaming_plot_items[ch_idx] = plot_item
+
+            if self.stream_first_update:
+                self.stream_first_update = False
+                self.plot_widget.enableAutoRange()
+
+    def update_fft(self):
+        """Calculate and display FFT for active channels with smoothing - reuses plot items"""
+        if not self.active_channels or self.stream_buffer is None:
+            # Clear the plot when no channels are selected
+            if hasattr(self, 'fft_plot_widget') and self.fft_plot_widget is not None:
+                self.fft_plot_widget.clear()
+                self.fft_plot_items.clear()
+            return
+
+        # Remove plot items for channels that are no longer active
+        channels_to_remove = [ch for ch in self.fft_plot_items if ch not in self.active_channels]
+        for ch_idx in channels_to_remove:
+            self.fft_plot_widget.removeItem(self.fft_plot_items[ch_idx])
+            del self.fft_plot_items[ch_idx]
+
+        for ch_idx in sorted(self.active_channels):
+            if ch_idx < self.num_channels:
+                data = np.nan_to_num(self.stream_buffer[ch_idx, :], nan=0.0)
+
+                # Apply Hanning window to eliminate spectral leakage
+                window = np.hanning(len(data))
+                windowed_data = data * window
+
+                # Compute FFT on windowed data
+                fft_vals = np.fft.rfft(windowed_data)
+                fft_freq = np.fft.rfftfreq(len(data), 1.0 / self.sampling_rate)
+
+                # Convert to power (dB), normalize for window energy loss
+                fft_power = 20 * np.log10(np.abs(fft_vals) * 2.0 / np.sum(window) + 1e-10)
+
+                # Temporal EMA smoothing
+                mask = fft_freq <= 50
+                new_fft = fft_power[mask]
+                if ch_idx in self.smoothed_fft:
+                    self.smoothed_fft[ch_idx] = (
+                        self.fft_smoothing_alpha * new_fft +
+                        (1 - self.fft_smoothing_alpha) * self.smoothed_fft[ch_idx]
+                    )
+                else:
+                    self.smoothed_fft[ch_idx] = new_fft.copy()
+
+                # Frequency-domain smoothing for a clean curve shape
+                display_fft = uniform_filter1d(self.smoothed_fft[ch_idx], size=5)
+
+                # Update or create plot item
+                color = pg.mkColor(self.channel_colors[ch_idx % len(self.channel_colors)])
+
+                if ch_idx in self.fft_plot_items:
+                    self.fft_plot_items[ch_idx].setData(fft_freq[mask], display_fft)
+                else:
+                    plot_item = self.fft_plot_widget.plot(
+                        fft_freq[mask],
+                        display_fft,
+                        pen=pg.mkPen(color=color, width=2),
+                        name=self.get_channel_name(ch_idx)
+                    )
+                    self.fft_plot_items[ch_idx] = plot_item
+
+                # Store for reference
+                self.fft_data[ch_idx] = (fft_freq[mask], self.smoothed_fft[ch_idx])
+
+    def update_band_power(self):
+        """Calculate and display band power for active channels - reuses bar graph item"""
+        if not self.active_channels or self.stream_buffer is None:
+            # Clear the plot when no channels are selected
+            if hasattr(self, 'band_power_plot_widget') and self.band_power_plot_widget is not None:
+                self.band_power_plot_widget.clear()
+                self.band_power_bar_item = None
+            return
+
+        if not SCIPY_AVAILABLE:
+            return
+
+        # Define frequency bands
+        bands = {
+            'Delta': (0.5, 4),
+            'Theta': (4, 8),
+            'Alpha': (8, 13),
+            'Mu': (8, 12),
+            'Beta': (13, 30),
+            'Gamma': (30, 50)
+        }
+
+        # Average across all active channels
+        band_powers = {band: 0.0 for band in bands.keys()}
+
+        for ch_idx in sorted(self.active_channels):
+            if ch_idx < self.num_channels:
+                data = np.nan_to_num(self.stream_buffer[ch_idx, :], nan=0.0)
+
+                # Compute PSD using Welch's method
+                freqs, psd = sp_signal.welch(data, fs=self.sampling_rate, nperseg=min(256, len(data)))
+
+                # Calculate power in each band
+                for band_name, (low, high) in bands.items():
+                    band_mask = (freqs >= low) & (freqs < high)
+                    if np.any(band_mask):
+                        band_powers[band_name] += np.mean(psd[band_mask])
+
+        # Average across channels
+        num_active = len(self.active_channels)
+        if num_active > 0:
+            for band in band_powers:
+                band_powers[band] /= num_active
+
+        # Apply exponential moving average smoothing
+        if self.smoothed_band_power:
+            for band_name in band_powers.keys():
+                if band_name in self.smoothed_band_power:
+                    self.smoothed_band_power[band_name] = (
+                        self.band_power_smoothing_alpha * band_powers[band_name] +
+                        (1 - self.band_power_smoothing_alpha) * self.smoothed_band_power[band_name]
+                    )
+                else:
+                    self.smoothed_band_power[band_name] = band_powers[band_name]
+        else:
+            # First time, initialize with current values
+            self.smoothed_band_power = band_powers.copy()
+
+        # Plot smoothed band powers as bar chart
+        band_names = list(bands.keys())
+        band_labels = [f"{name}\n({low}-{high} Hz)" for name, (low, high) in bands.items()]
+        band_values = [self.smoothed_band_power[name] for name in band_names]
+        x_pos = np.arange(len(band_names))
+        bar_color = (200, 80, 80) if self.theme == 'dark' else (60, 100, 200)
+
+        # Stable Y-axis: track running max, slowly decay so axis doesn't jump
+        current_max = max(band_values) if band_values else 1.0
+        if current_max > self.band_power_y_max:
+            self.band_power_y_max = current_max
+        else:
+            # Slowly decay toward current max (prevents axis from being stuck too high)
+            self.band_power_y_max = 0.995 * self.band_power_y_max + 0.005 * current_max
+
+        # Reuse or create bar graph item
+        if self.band_power_bar_item is None:
+            # First time: create bar graph and add to widget
+            self.band_power_bar_item = pg.BarGraphItem(x=x_pos, height=band_values, width=0.6, brush=bar_color)
+            self.band_power_plot_widget.addItem(self.band_power_bar_item)
+
+            # Set x-axis labels (only needs to be done once)
+            ax = self.band_power_plot_widget.getAxis('bottom')
+            ax.setTicks([[(i, band_labels[i]) for i in range(len(band_labels))]])
+        else:
+            # Update existing bar graph item
+            self.band_power_bar_item.setOpts(height=band_values, brush=bar_color)
+
+        # Lock Y-axis to stable max with 10% headroom
+        self.band_power_plot_widget.setYRange(0, self.band_power_y_max * 1.1)
+
+    def _open_web_task(self, title, candidate_rel_paths):
+        # Parentless window so QWebEngineView's GPU compositor does not
+        # interfere with pyqtgraph's OpenGL context in the main window.
+        self.task_window = QMainWindow()
+        self.task_window.setWindowTitle(title)
+        self.task_window.resize(1024, 768)
+
+        # Create WebEngineView and set it as the central widget
+        self.web_view = QWebEngineView()
+        self.task_window.setCentralWidget(self.web_view)
+
+        # Set up the two-way communication channel
+        self.channel = QWebChannel()
+        self.bridge = TaskWebBridge(self)
+        self.channel.registerObject("pyBridge", self.bridge)
+        self.web_view.page().setWebChannel(self.channel)
+
+        # Pre-fill form fields once the page is loaded
+        self.web_view.loadFinished.connect(self._prefill_task_form)
+
+        html_path = None
+        for rel_path in candidate_rel_paths:
+            candidate = resource_path(rel_path)
+            if os.path.exists(candidate):
+                html_path = candidate
+                break
+
+        if html_path is None:
+            QMessageBox.critical(
+                self,
+                "Task Missing",
+                "Could not find task web assets.\n"
+                "Expected one of:\n- " + "\n- ".join(candidate_rel_paths)
+            )
+            return
+
+        self.web_view.setUrl(QUrl.fromLocalFile(html_path))
+        self.task_window.show()
+
+    def motor_imagery_task(self):
+        self._open_web_task(
+            "Neural Data Acquisition Task - Motor Imagery",
+            [
+                os.path.join("tasks", "motor_imagery", "index.html"),
+                "motor_imagery_index.html",
+            ],
+        )
+
+    def assr_task(self):
+        self._open_web_task(
+            "Neural Data Acquisition Task - ASSR",
+            [
+                os.path.join("tasks", "assr", "index.html"),
+                "assr_index.html",
+            ],
+        )
+
+    def _prefill_task_form(self, ok: bool):
+        """Inject subject ID and save directory into the motor imagery web form."""
+        if not ok:
+            return
+        subject_id = self.patient_id_input.text().strip() or self.patient_id
+        save_dir   = self.xdf_save_dir
+        js = (
+            f"(function(){{"
+            f"  var sid = document.getElementById('subName');"
+            f"  var sdir = document.getElementById('saveDir');"
+            f"  if(sid && !sid.value) sid.value = {json.dumps(subject_id)};"
+            f"  if(sdir && !sdir.value) sdir.value = {json.dumps(save_dir)};"
+            f"}})();"
+        )
+        self.web_view.page().runJavaScript(js)
+
+    def launch_prosthetic(self):
+        """Launch the Prosthetic Control window."""
+        try:
+            from Prosthetic.prosthetic_gui import ProstheticWindow
+        except ImportError as e:
+            QMessageBox.critical(self, "Import Error", f"Could not load Prosthetic module:\n{e}")
+            return
+        board    = self.board    if hasattr(self, 'board')    else None
+        board_id = self.board_id if hasattr(self, 'board_id') else None
+        win = ProstheticWindow(board, board_id, parent=self)
+        win.exec()
+
+    def on_magnitude_changed(self, text):
+        """Handle magnitude scale change"""
+        try:
+            self.magnitude_scale = int(text)
+        except:
+            self.magnitude_scale = 100
+
+    def on_smooth_slider_changed(self, value):
+        """Handle smooth slider change.
+
+        Box Filter: value * 10 = window in ms (10–500 ms)
+        EMA:        value maps linearly to alpha 0.05–0.95
+        """
+        if self.smooth_type == 'EMA':
+            alpha = 0.05 + (value - 1) / 49.0 * 0.90
+            self.smooth_seconds = round(alpha, 2)
+            self.smooth_label.setText(f"α {alpha:.2f}")
+        else:
+            ms = value * 10
+            self.smooth_seconds = ms / 1000.0
+            self.smooth_label.setText(f"{ms} ms")
+
+    def on_smooth_type_changed(self, smooth_type):
+        """Switch between Box Filter and EMA smoothing."""
+        self.smooth_type = smooth_type
+        self.on_smooth_slider_changed(self.smooth_slider.value())
+
+    def on_smooth_checkbox_changed(self, state):
+        """Enable or disable smoothing"""
+        # PyQt6 stateChanged emits int, not Qt.CheckState — convert before comparing
+        check_state = Qt.CheckState(state) if isinstance(state, int) else state
+        self.smoothing_enabled = (check_state == Qt.CheckState.Checked)
+        self.smooth_slider.setEnabled(self.smoothing_enabled)
+
+    def toggle_all_channels(self, state):
+        """Toggle all channel checkboxes"""
+        # PyQt6 stateChanged emits int, not Qt.CheckState — convert before comparing
+        check_state = Qt.CheckState(state) if isinstance(state, int) else state
+        is_checked = (check_state == Qt.CheckState.Checked)
+        for cb in self.channel_checkboxes:
+            cb.blockSignals(True)
+            cb.setChecked(is_checked)
+            cb.blockSignals(False)
+
+        # Manually update active channels
+        if is_checked:
+            self.active_channels = set(range(self.num_channels))
+        else:
+            self.active_channels.clear()
+
+        self.update_selected_channels_label()
+
+        # Update plots for file mode only - streaming mode updates via timer
+        if self.file_loaded and not self.streaming_active:
+            self.update_plot()
+            self.calculate_fft_for_file()
+            self.calculate_band_power_for_file()
+
+    def update_selected_channels_label(self):
+        """Update the label showing selected channels"""
+        if not self.active_channels:
+            self.selected_channels_label.setText("No channels selected")
+        elif len(self.active_channels) == self.num_channels:
+            self.selected_channels_label.setText(f"All {self.num_channels} channels selected")
+        else:
+            selected_list = sorted(list(self.active_channels))
+            if len(selected_list) <= 5:
+                channels_str = ", ".join([self.get_channel_name(i) for i in selected_list])
+                self.selected_channels_label.setText(f"Selected: {channels_str}")
+            else:
+                self.selected_channels_label.setText(f"{len(selected_list)} channels selected")
+
+    def apply_theme(self):
+        """Apply the selected theme to the application"""
+        app = QApplication.instance()
+        
+        if app is None:
+            return
+
+        if self.theme == 'dark':
+            # Sleek dark theme
+            dark_palette = QPalette()
+            dark_palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))
+            dark_palette.setColor(QPalette.ColorRole.WindowText, QColor(230, 230, 230))
+            dark_palette.setColor(QPalette.ColorRole.Base, QColor(25, 25, 25))
+            dark_palette.setColor(QPalette.ColorRole.AlternateBase, QColor(35, 35, 35))
+            dark_palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(50, 50, 50))
+            dark_palette.setColor(QPalette.ColorRole.ToolTipText, QColor(230, 230, 230))
+            dark_palette.setColor(QPalette.ColorRole.Text, QColor(230, 230, 230))
+            dark_palette.setColor(QPalette.ColorRole.Button, QColor(45, 45, 45))
+            dark_palette.setColor(QPalette.ColorRole.ButtonText, QColor(230, 230, 230))
+            dark_palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 100, 100))
+            dark_palette.setColor(QPalette.ColorRole.Link, QColor(80, 160, 255))
+            dark_palette.setColor(QPalette.ColorRole.Highlight, QColor(70, 130, 220))
+            dark_palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
+            dark_palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(100, 100, 100))
+            dark_palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(100, 100, 100))
+            app.setPalette(dark_palette)
+
+            # Sleek dark plots
+            pg.setConfigOption('background', (20, 20, 20))
+            pg.setConfigOption('foreground', (230, 230, 230))
+
+            # Sleek stylesheet
+            app.setStyleSheet("""
+                QGroupBox { border: 1px solid #3a3a3a; border-radius: 5px; margin-top: 10px; padding-top: 10px; font-weight: bold; }
+                QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 2px 5px; color: #e6e6e6; }
+                QPushButton { background-color: #3d3d3d; border: 1px solid #555; border-radius: 4px; padding: 5px 10px; color: #e6e6e6; }
+                QPushButton:hover { background-color: #4a4a4a; border: 1px solid #6a6a6a; }
+                QPushButton:pressed { background-color: #2a2a2a; }
+                QPushButton:disabled { background-color: #2a2a2a; color: #646464; }
+                QComboBox { background-color: #3d3d3d; border: 1px solid #555; border-radius: 4px; padding: 3px 10px; color: #e6e6e6; }
+                QComboBox:hover { border: 1px solid #6a6a6a; }
+                QSpinBox, QDoubleSpinBox, QLineEdit { background-color: #3d3d3d; border: 1px solid #555; border-radius: 4px; padding: 3px; color: #e6e6e6; }
+                QSlider::groove:horizontal { background: #3a3a3a; height: 6px; border-radius: 3px; }
+                QSlider::handle:horizontal { background: #4686d6; width: 14px; margin: -4px 0; border-radius: 7px; }
+                QSlider::groove:vertical { background: #3a3a3a; width: 6px; border-radius: 3px; }
+                QSlider::handle:vertical { background: #4686d6; height: 14px; margin: 0 -4px; border-radius: 7px; }
+                QTabWidget::pane { border: 1px solid #3a3a3a; background: #1e1e1e; }
+                QTabBar::tab { background: #2d2d2d; border: 1px solid #3a3a3a; padding: 8px 16px; color: #e6e6e6; }
+                QTabBar::tab:selected { background: #3d3d3d; border-bottom-color: #3d3d3d; }
+                QTabBar::tab:hover { background: #3a3a3a; }
+                QMessageBox { background-color: #2a2a2a; color: #e6e6e6; }
+                QMessageBox QLabel { color: #e6e6e6; }
+                QDialog { background-color: #2a2a2a; color: #e6e6e6; }
+            """)
+
+        else:
+            # Light theme — clean white with Longhorn palette accents
+            # 213C58 = dark navy, 598BBC = steel blue, F9F6EE = warm off-white
+            # FFEBAD = pale gold, BF5801 = burnt orange
+            light_palette = QPalette()
+            light_palette.setColor(QPalette.ColorRole.Window, QColor(255, 255, 255))
+            light_palette.setColor(QPalette.ColorRole.WindowText, QColor(28, 40, 51))
+            light_palette.setColor(QPalette.ColorRole.Base, QColor(248, 250, 252))
+            light_palette.setColor(QPalette.ColorRole.AlternateBase, QColor(240, 244, 248))
+            light_palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 255))
+            light_palette.setColor(QPalette.ColorRole.ToolTipText, QColor(28, 40, 51))
+            light_palette.setColor(QPalette.ColorRole.Text, QColor(28, 40, 51))
+            light_palette.setColor(QPalette.ColorRole.Button, QColor(237, 242, 247))
+            light_palette.setColor(QPalette.ColorRole.ButtonText, QColor(28, 40, 51))
+            light_palette.setColor(QPalette.ColorRole.BrightText, QColor(191, 88, 1))
+            light_palette.setColor(QPalette.ColorRole.Link, QColor(89, 139, 188))
+            light_palette.setColor(QPalette.ColorRole.Highlight, QColor(89, 139, 188))
+            light_palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
+            light_palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(160, 170, 180))
+            light_palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(160, 170, 180))
+            app.setPalette(light_palette)
+
+            pg.setConfigOption('background', (248, 250, 252))
+            pg.setConfigOption('foreground', (28, 40, 51))
+
+            app.setStyleSheet("""
+                QWidget { background-color: #ffffff; color: #1c2833; }
+                QGroupBox {
+                    border: 1px solid #598BBC;
+                    border-radius: 5px;
+                    margin-top: 10px;
+                    padding-top: 10px;
+                    font-weight: bold;
+                    color: #213C58;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    subcontrol-position: top left;
+                    padding: 2px 5px;
+                    color: #213C58;
+                }
+                QPushButton {
+                    border: 1px solid #598BBC;
+                    border-radius: 4px;
+                    padding: 5px 10px;
+                    background-color: #edf2f7;
+                    color: #213C58;
+                    font-weight: 600;
+                }
+                QPushButton:hover { background-color: #d6e4f0; border-color: #213C58; }
+                QPushButton:pressed { background-color: #c2d7e8; }
+                QPushButton:disabled { background-color: #f0f0f0; color: #aaa; border-color: #ccc; }
+                QComboBox {
+                    background-color: #f8fafc;
+                    border: 1px solid #598BBC;
+                    border-radius: 4px;
+                    padding: 3px 10px;
+                    color: #213C58;
+                }
+                QComboBox:hover { border-color: #213C58; }
+                QSpinBox, QDoubleSpinBox, QLineEdit {
+                    background-color: #f8fafc;
+                    border: 1px solid #598BBC;
+                    border-radius: 4px;
+                    padding: 3px;
+                    color: #213C58;
+                }
+                QSlider::groove:horizontal { background: #c2d7e8; height: 6px; border-radius: 3px; }
+                QSlider::handle:horizontal { background: #598BBC; width: 14px; margin: -4px 0; border-radius: 7px; }
+                QSlider::groove:vertical { background: #c2d7e8; width: 6px; border-radius: 3px; }
+                QSlider::handle:vertical { background: #598BBC; height: 14px; margin: 0 -4px; border-radius: 7px; }
+                QTabWidget::pane { border: 1px solid #598BBC; background: #ffffff; }
+                QTabBar::tab {
+                    background: #edf2f7;
+                    border: 1px solid #598BBC;
+                    padding: 8px 16px;
+                    color: #213C58;
+                    font-weight: 600;
+                }
+                QTabBar::tab:selected { background: #ffffff; border-bottom-color: #ffffff; color: #213C58; }
+                QTabBar::tab:hover { background: #d6e4f0; }
+                QMessageBox { background-color: #ffffff; color: #1c2833; }
+                QMessageBox QLabel { color: #1c2833; }
+                QDialog { background-color: #ffffff; color: #1c2833; }
+                QScrollArea { border: none; background: transparent; }
+            """)
+
+        # Regenerate channel colors for the new theme
+        self.generate_channel_colors()
+
+        # Update backgrounds and foregrounds on existing plot widgets
+        bg = (20, 20, 20) if self.theme == 'dark' else 'w'
+        fg = (230, 230, 230) if self.theme == 'dark' else 'k'
+        if hasattr(self, 'plot_widget') and self.plot_widget is not None:
+            self.plot_widget.setBackground(bg)
+        for pw in [getattr(self, 'fft_plot_widget', None),
+                    getattr(self, 'band_power_plot_widget', None)]:
+            if pw is not None:
+                pw.setBackground(bg)
+                for axis_name in ('left', 'bottom'):
+                    ax = pw.getAxis(axis_name)
+                    ax.setPen(pg.mkPen(color=fg))
+                    ax.setTextPen(pg.mkPen(color=fg))
+
+        # Reset band power bar item so it recreates with new colors/labels
+        self.band_power_bar_item = None
+        if hasattr(self, 'band_power_plot_widget') and self.band_power_plot_widget is not None:
+            self.band_power_plot_widget.clear()
+
+        # Clear streaming FFT items so they recreate with new colors
+        if hasattr(self, 'fft_plot_items'):
+            self.fft_plot_items.clear()
+        if hasattr(self, 'fft_plot_widget') and self.fft_plot_widget is not None:
+            self.fft_plot_widget.clear()
+
+        # Rebuild plots so new colors and background take effect
+        if self.file_loaded or self.streaming_active:
+            if self.display_mode == 'stacked':
+                self.setup_stacked_mode()
+            else:
+                self.setup_overlay_mode()
+            self.update_plot()
+
+    def calculate_fft_for_file(self):
+        """Calculate and display FFT for file mode with smoothing - reuses plot items"""
+        if not self.active_channels or self.raw_data is None:
+            # Clear the plot when no channels are selected
+            if hasattr(self, 'fft_plot_widget') and self.fft_plot_widget is not None:
+                self.fft_plot_widget.clear()
+                self.fft_plot_items.clear()
+            return
+
+        if not SCIPY_AVAILABLE:
+            return
+
+        # Remove plot items for channels that are no longer active
+        channels_to_remove = [ch for ch in self.fft_plot_items if ch not in self.active_channels]
+        for ch_idx in channels_to_remove:
+            self.fft_plot_widget.removeItem(self.fft_plot_items[ch_idx])
+            del self.fft_plot_items[ch_idx]
+
+        # Get current window data
+        start_sample, end_sample = self.get_window_bounds(self.current_window)
+
+        for ch_idx in sorted(self.active_channels):
+            if ch_idx < self.num_channels:
+                data = self.raw_data[ch_idx, start_sample:end_sample]
+
+                # Apply Hanning window to eliminate spectral leakage
+                window = np.hanning(len(data))
+                windowed_data = data * window
+
+                # Compute FFT on windowed data
+                fft_vals = np.fft.rfft(windowed_data)
+                fft_freq = np.fft.rfftfreq(len(data), 1.0 / self.sampling_rate)
+
+                # Convert to power (dB), normalize for window energy loss
+                fft_power = 20 * np.log10(np.abs(fft_vals) * 2.0 / np.sum(window) + 1e-10)
+
+                # Temporal EMA smoothing
+                mask = fft_freq <= 50
+                new_fft_data = fft_power[mask]
+
+                # Check if smoothed buffer exists and has correct shape
+                if ch_idx in self.smoothed_fft:
+                    if self.smoothed_fft[ch_idx].shape != new_fft_data.shape:
+                        del self.smoothed_fft[ch_idx]
+
+                if ch_idx in self.smoothed_fft:
+                    self.smoothed_fft[ch_idx] = (
+                        self.fft_smoothing_alpha * new_fft_data +
+                        (1 - self.fft_smoothing_alpha) * self.smoothed_fft[ch_idx]
+                    )
+                else:
+                    self.smoothed_fft[ch_idx] = new_fft_data.copy()
+
+                # Frequency-domain smoothing for a clean curve shape
+                display_fft = uniform_filter1d(self.smoothed_fft[ch_idx], size=5)
+
+                color = pg.mkColor(self.channel_colors[ch_idx % len(self.channel_colors)])
+
+                # Reuse existing plot item or create new one
+                if ch_idx in self.fft_plot_items:
+                    self.fft_plot_items[ch_idx].setData(fft_freq[mask], display_fft)
+                else:
+                    plot_item = self.fft_plot_widget.plot(
+                        fft_freq[mask],
+                        display_fft,
+                        pen=pg.mkPen(color=color, width=2),
+                        name=self.get_channel_name(ch_idx)
+                    )
+                    self.fft_plot_items[ch_idx] = plot_item
+
+    def calculate_band_power_for_file(self):
+        """Calculate and display band power for file mode with smoothing - reuses bar graph item"""
+        if not self.active_channels or self.raw_data is None:
+            # Clear the plot when no channels are selected
+            if hasattr(self, 'band_power_plot_widget') and self.band_power_plot_widget is not None:
+                self.band_power_plot_widget.clear()
+                self.band_power_bar_item = None
+            return
+
+        if not SCIPY_AVAILABLE:
+            return
+
+        # Define frequency bands
+        bands = {
+            'Delta': (0.5, 4),
+            'Theta': (4, 8),
+            'Alpha': (8, 13),
+            'Mu': (8, 12),
+            'Beta': (13, 30),
+            'Gamma': (30, 50)
+        }
+
+        # Get current window data
+        start_sample, end_sample = self.get_window_bounds(self.current_window)
+
+        # Average across all active channels
+        band_powers = {band: 0.0 for band in bands.keys()}
+
+        for ch_idx in sorted(self.active_channels):
+            if ch_idx < self.num_channels:
+                data = self.raw_data[ch_idx, start_sample:end_sample]
+
+                # Compute PSD using Welch's method
+                freqs, psd = sp_signal.welch(data, fs=self.sampling_rate, nperseg=min(256, len(data)))
+
+                # Calculate power in each band
+                for band_name, (low, high) in bands.items():
+                    band_mask = (freqs >= low) & (freqs < high)
+                    if np.any(band_mask):
+                        band_powers[band_name] += np.mean(psd[band_mask])
+
+        # Average across channels
+        num_active = len(self.active_channels)
+        if num_active > 0:
+            for band in band_powers:
+                band_powers[band] /= num_active
+
+        # Apply exponential moving average smoothing
+        if self.smoothed_band_power:
+            for band_name in band_powers.keys():
+                if band_name in self.smoothed_band_power:
+                    self.smoothed_band_power[band_name] = (
+                        self.band_power_smoothing_alpha * band_powers[band_name] +
+                        (1 - self.band_power_smoothing_alpha) * self.smoothed_band_power[band_name]
+                    )
+                else:
+                    self.smoothed_band_power[band_name] = band_powers[band_name]
+        else:
+            # First time, initialize with current values
+            self.smoothed_band_power = band_powers.copy()
+
+        # Plot smoothed band powers
+        band_names = list(bands.keys())
+        band_labels = [f"{name}\n({low}-{high} Hz)" for name, (low, high) in bands.items()]
+        band_values = [self.smoothed_band_power[name] for name in band_names]
+        x_pos = np.arange(len(band_names))
+        bar_color = (200, 80, 80) if self.theme == 'dark' else (60, 100, 200)
+
+        # Stable Y-axis: track running max, slowly decay
+        current_max = max(band_values) if band_values else 1.0
+        if current_max > self.band_power_y_max:
+            self.band_power_y_max = current_max
+        else:
+            self.band_power_y_max = 0.995 * self.band_power_y_max + 0.005 * current_max
+
+        # Reuse or create bar graph item (avoids flicker from clear+recreate)
+        if self.band_power_bar_item is None:
+            self.band_power_bar_item = pg.BarGraphItem(x=x_pos, height=band_values, width=0.6, brush=bar_color)
+            self.band_power_plot_widget.addItem(self.band_power_bar_item)
+
+            # Set x-axis labels (only needs to be done once)
+            ax = self.band_power_plot_widget.getAxis('bottom')
+            ax.setTicks([[(i, band_labels[i]) for i in range(len(band_labels))]])
+        else:
+            self.band_power_bar_item.setOpts(height=band_values, brush=bar_color)
+
+        # Lock Y-axis to stable max with 10% headroom
+        self.band_power_plot_widget.setYRange(0, self.band_power_y_max * 1.1)
+
+
+def main():
+    # Initialize app with no file
+    # Check if QApplication instance already exists
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    # Check for updates only in packaged/frozen app builds.
+    # During source/dev runs, updater can switch to an older bundled app and hide
+    # local UI changes (e.g., newly added task modes).
+    if getattr(sys, "frozen", False):
+        # If an update is applied the process exits inside prompt_update_if_available.
+        prompt_update_if_available()
+
+    viewer = SegmentViewer()
+    viewer.showMaximized()    # open full-screen (keeps system taskbar)
+    viewer.activateWindow()   # bring to front on Windows
+    viewer.raise_()           # raise above other windows
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

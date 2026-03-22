@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preload" href="SpaceGrotesk.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" type="text/css" href="styles.css">
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <title>ASSR Task</title>
+    <style>
+        #assr-stage {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: #050505;
+            color: #eaf6ff;
+            font-family: "Space Grotesk", sans-serif;
+            overflow: hidden;
+        }
+        #crosshair {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 48px;
+            color: #7b8490;
+            letter-spacing: 2px;
+        }
+        #cue-text {
+            position: absolute;
+            top: 18%;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 34px;
+            font-weight: 700;
+            color: #00f2ff;
+            text-align: center;
+        }
+        #subcue-text {
+            position: absolute;
+            top: 27%;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 22px;
+            color: #8ca0b4;
+            text-align: center;
+        }
+        #side-indicators {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+        }
+        .ear-box {
+            position: absolute;
+            top: 45%;
+            width: 180px;
+            height: 180px;
+            border: 3px solid #1f2730;
+            border-radius: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 88px;
+            color: #212934;
+            transition: all 120ms linear;
+        }
+        #left-ear-box { left: 18%; }
+        #right-ear-box { right: 18%; }
+        .active-left {
+            border-color: #00f2ff !important;
+            color: #00f2ff !important;
+            box-shadow: 0 0 24px rgba(0, 242, 255, 0.45);
+        }
+        .active-right {
+            border-color: #8e6dff !important;
+            color: #8e6dff !important;
+            box-shadow: 0 0 24px rgba(142, 109, 255, 0.45);
+        }
+        #progress-wrap {
+            position: absolute;
+            top: 36%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: min(62vw, 760px);
+            height: 14px;
+            border: 1px solid #2a3745;
+            border-radius: 999px;
+            overflow: hidden;
+            background: rgba(15, 22, 30, 0.9);
+        }
+        #progress-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #00f2ff, #8e6dff);
+            transition: width 50ms linear;
+        }
+        #status-footer {
+            position: absolute;
+            bottom: 26px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 20px;
+            color: #7f8f9e;
+            letter-spacing: 0.6px;
+            text-align: center;
+        }
+        #phase-tag {
+            position: absolute;
+            top: 22px;
+            right: 26px;
+            font-size: 15px;
+            color: #8aa0b4;
+        }
+    </style>
+</head>
+<body>
+    <div id="app-container">
+        <div id="welcome-screen" class="screen">
+            <div class="header-container">
+                <h1 class="main-title">ASSR Protocol</h1>
+                <p class="sub-title">Calibration + Dichotic Attention</p>
+            </div>
+
+            <div class="glass-card scrollable">
+                <div class="input-row">
+                    <label>Subject ID</label>
+                    <input type="text" id="subName" placeholder="SUB_001">
+                </div>
+                <div class="input-row">
+                    <label>Calibration Trials / Side</label>
+                    <input type="number" id="calTrialsPerSide" value="10" min="1" step="1">
+                </div>
+                <div class="input-row">
+                    <label>Main Trials / Side</label>
+                    <input type="number" id="mainTrialsPerSide" value="20" min="1" step="1">
+                </div>
+                <div class="input-row align-top">
+                    <label>Save Location</label>
+                    <div class="input-content-wrapper">
+                        <input type="text" id="saveDir" placeholder="~/Documents/EEG_Recordings">
+                        <button onclick="pickSaveDir()" class="btn-small" style="margin-top:6px; width:100%;">Browse…</button>
+                    </div>
+                </div>
+                <button onclick="showInstructions()" class="btn-primary">Review Protocol</button>
+            </div>
+        </div>
+
+        <div id="instruction-screen" class="screen" style="display:none;">
+            <h1 class="main-title" style="color:var(--accent); margin-bottom:20px;">ASSR Trial Guide</h1>
+            <div class="glass-card instruction-text">
+                <div class="guide-item"><span>PHASE 1</span> Calibration: 37 Hz left-only and 43 Hz right-only baseline trials.</div>
+                <div class="guide-item"><span>PHASE 2</span> Dichotic attention: same dichotic audio each trial, cue changes focus (LEFT/RIGHT).</div>
+                <div class="guide-item"><span>JITTER</span> Rest and fixation timings are randomized per trial.</div>
+                <div class="guide-item"><span>MARKERS</span> Numeric trigger markers are sent at audio starts (101/102/201/202) and main rest reset (10).</div>
+                <button onclick="startProtocol()" class="btn-primary accent">Start ASSR Task</button>
+            </div>
+        </div>
+
+        <div id="assr-stage">
+            <div id="phase-tag">ASSR Task</div>
+            <div id="cue-text">Preparing...</div>
+            <div id="subcue-text"></div>
+            <div id="progress-wrap"><div id="progress-fill"></div></div>
+            <div id="crosshair">+</div>
+            <div id="side-indicators">
+                <div id="left-ear-box" class="ear-box">L</div>
+                <div id="right-ear-box" class="ear-box">R</div>
+            </div>
+            <div id="status-footer">Waiting to begin</div>
+        </div>
+
+        <div id="closing-screen" class="screen" style="display:none;">
+            <div class="glass-card">
+                <h1 style="color:var(--accent)">ASSR Complete</h1>
+                <p id="data-log">All protocol trials finished and streams closed.</p>
+                <button onclick="resetToHome()" class="btn-outline">Return to Home</button>
+            </div>
+        </div>
+    </div>
+    <script src="assr_app.js"></script>
+</body>
+</html>
