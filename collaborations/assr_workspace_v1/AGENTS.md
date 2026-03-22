@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance when working with code in this repository.
 
 ## Running the App
 
@@ -25,8 +25,8 @@ This is a single-file PyQt6 desktop application (`GUI.py`) for EEG/EMG neural da
 ### Supporting Modules
 
 - **`conversions.py`** — loads `.pkl` (pickle) and `.gdf` (GDF/MNE) EEG files into numpy arrays + metadata dicts.
-- **`updater.py`** — checks GitHub Releases API at startup, downloads the platform asset, and spawns a platform-specific script (`.bat` / `.sh`) to replace the binary and relaunch.
-- **`version.py`** — `CURRENT_VERSION` is `"build-0"` in source; CI replaces `_INJECTED` with `"build-<run_number>"` via `sed` before PyInstaller runs. Do not edit manually.
+- **`updater.py`** — checks GitHub Releases API at startup, downloads the platform asset, and spawns a platform-specific script (`.bat` / `.sh`) to replace the binary and relaunch. When doing this, make sure to create a new virtual environment by doing pip install -r requirements on terminal to install correct and updated versions of all libraries
+- **`version.py`** — `CURRENT_VERSION` is "build-0" in source; CI replaces `_INJECTED` with "build-<run_number>" via `sed` before PyInstaller runs. Do not edit manually.
 - **`Prosthetic/prosthetic_gui.py`** — self-contained EMG decoding dialog. Uses BrainFlow to read EMG channels, runs an RMS-based per-finger decoder, and renders a `HandWidget` (QPainter-drawn) colored green-to-red by flexion.
 - **`tasks/motor_imagery/`** — embedded web app (HTML/CSS/JS) loaded in `QWebEngineView`. Communicates with Python via `QWebChannel`. Drives the motor imagery recording task; JS calls `TaskWebBridge` slots to start LSL streams and push markers.
 
@@ -59,3 +59,59 @@ Pushes to `main` that touch `.py`, `requirements.txt`, the workflow file, or ass
 4. Creates a GitHub Release tagged `build-<run_number>` with all three platform artifacts.
 
 Release tags must follow the `build-N` format — `updater.py` parses this format to compare versions numerically.
+
+## PROTOCOL FOR IMAGERY TASK
+
+Phase 1: Calibration (Single-Ear Baseline)
+Goal: Record clean 37Hz and 43Hz neural "fingerprints" and habituate the participant.
+Total Trials: 20 (10 Left, 10 Right, randomized):
+
+1. Rest (3.0 – 5.0s): Blank screen. Jittered to prevent anticipatory ERPs.
+
+2. Fixation (1.5 – 2.5s): Center Cross (+). Participant stops blinking.
+
+3. Prime/Cue (1.5s):
+    - Visual: "LEFT" (37Hz) or "RIGHT" (43Hz) text + Progress Bar filling up.
+    - Audio: Mono LEFT_1000HZ_37HZAM.wav or RIGHT_1000HZ_43HZAM.wav.
+
+4.Stimulation Task (6.0s):
+    - Visual: Constant Green Border around the target side.
+    - Audio: Continued Mono AM tone.
+    - Action: Passive listening; maintain focus on the frequency.
+
+    XDF Markers: 101 (Start 37Hz Left), 102 (Start 43Hz Right).
+
+
+Phase 2: Main Dichotic Attention (Selective Task):
+Goal: Measure the neural suppression of the unattended frequency during dichotic listening.
+Total Trials: 40 (20 "Attend Left," 20 "Attend Right," randomized).
+
+1. Inter-Trial Rest (3.0 – 5.0s): Blank screen. XDF Marker: 10 (Trial Reset).
+
+2. Fixation / Warning (2.0 – 3.0s): Center Cross (+). Jittered.
+
+3. The Target Prime (1.5s):
+    - Visual: "FOCUS LEFT" or "FOCUS RIGHT" with filling letter (L or R).
+    - Audio: 500ms "Probe" burst of the target frequency (e.g., 37Hz for Left) to "tune" the auditory cortex.
+
+4. The Other Prime(1.5s):
+    - Visual: "OTHER: RIGHT"(or left)
+    - Audio: 500ms burst of non - target ear(depending on target shown in step 3)
+
+4. Preparation Gap (0.5 – 1.0s): Silence. Blank screen. Clears echoic memory before the mix.
+
+5. Dichotic Task (6.0s):
+    - Audio: DICHOTIC_1000HZ_37VS43HZAM.wav (Both ears active).
+    - Visual: Target side (L or R) stays highlighted/lit.
+    - Action: Attend strictly to the cued frequency; ignore the "distractor" ear.
+    - XDF Markers:
+        - 201 (Dichotic Start - Attend Left/37Hz)
+        - 202 (Dichotic Start - Attend Right/43Hz)
+
+6. End of Trial: 1.0s buffer before returning to Rest.
+
+
+GUI Configuration Settings:
+Jitter Logic: Use a random float between the Min/Max values for every trial.
+Marker Sync: Triggers must be sent at the Audio Buffer Start to ensure 1ms precision for FFT analysis.
+Audio Duration: 6 seconds is the optimized window for ASSR stability vs. participant fatigue.
