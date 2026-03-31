@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QSlider, QSpinBox, QPushButton, QLabel, QGroupBox,
     QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QRadioButton, QButtonGroup,
     QFileDialog, QMessageBox, QComboBox, QLineEdit, QTabWidget, QMenu, QWidgetAction, QScrollArea,
-    QInputDialog, QToolButton, QSizePolicy, QProgressBar, QGridLayout
+    QInputDialog, QToolButton, QSizePolicy, QProgressBar, QGridLayout, QSpacerItem
 )
 from PyQt6.QtCore import Qt, QTimer, QSize
 from PyQt6.QtGui import QPalette, QColor, QKeySequence, QShortcut, QAction, QIcon, QPixmap, QDesktopServices

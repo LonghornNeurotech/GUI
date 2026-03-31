@@ -208,4 +208,7 @@ __marimo__/
 
 .DS_Store
 
-.vscode/
+# Claude Code
+.claude/
+.planning/
+CLAUDE.md
