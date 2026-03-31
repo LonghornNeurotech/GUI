@@ -674,10 +674,6 @@ class SegmentViewer(QMainWindow):
             'beta': {},   # 13-30 Hz
             'gamma': {}   # 30-50 Hz
         }
-        # Throttle FFT/band power updates (these are expensive, no need at 60Hz)
-        self.fft_update_counter = 0
-        self.fft_update_interval = 3  # Update FFT every 3rd frame (~20Hz)
-
         # Smoothing for FFT and band power
         # Higher alpha = more responsive to current data; frequency-domain smoothing handles visual smoothness
         self.fft_smoothing_alpha = 0.4
@@ -690,16 +686,19 @@ class SegmentViewer(QMainWindow):
         
         self.setWindowTitle("Longhorn Neural Interface Platform - No File Loaded")
         self.setGeometry(100, 100, 1600, 900)
-        self.setWindowIcon(QIcon(resource_path("icon.png")))
+        self.setWindowIcon(QIcon(resource_path("145164501.png")))
 
         # Main widget and layout
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout_container = QHBoxLayout(main_widget)
 
-        # Left panel for controls
+        # Left panel for controls (scrollable so buttons never get compressed)
+        left_panel_scroll = QScrollArea()
+        left_panel_scroll.setWidgetResizable(True)
+        left_panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_panel_scroll.setMaximumWidth(350)
         left_panel = QWidget()
-        left_panel.setMaximumWidth(350)
         left_panel_layout = QVBoxLayout(left_panel)
         left_panel_layout.setContentsMargins(4, 4, 4, 4)
 
@@ -707,20 +706,20 @@ class SegmentViewer(QMainWindow):
         self._banner_menu = QMenu(self)
         self._banner_menu.setStyleSheet("""
             QMenu {
-                background-color: rgba(33, 60, 88, 0.5);
-                border: 1px solid rgba(89, 139, 188, 0.5);
+                background-color: rgba(33, 60, 88, 1.0);
+                border: 1px solid rgba(89, 139, 188, 1.0);
                 border-radius: 6px;
                 padding: 4px 0px;
             }
             QMenu::item {
-                color: rgba(249, 246, 238, 0.5);
+                color: rgba(249, 246, 238, 1.0);
                 padding: 6px 12px;
                 font-size: 12px;
                 font-weight: 600;
             }
             QMenu::item:selected {
-                background: rgba(89, 139, 188, 0.5);
-                color: rgba(255, 255, 255, 0.8);
+                background: rgba(89, 139, 188, 1.0);
+                color: rgba(255, 255, 255, 1.0);
                 border-radius: 4px;
             }
         """)
@@ -730,8 +729,12 @@ class SegmentViewer(QMainWindow):
         _github_action = QAction("Visit GitHub", self)
         _github_action.triggered.connect(
             lambda: QDesktopServices.openUrl(QUrl("https://github.com/LonghornNeurotech")))
+        _about_action = QAction("About", self)
+        _about_action.triggered.connect(self._show_about_dialog)
         self._banner_menu.addAction(_website_action)
         self._banner_menu.addAction(_github_action)
+        self._banner_menu.addSeparator()
+        self._banner_menu.addAction(_about_action)
 
         self.banner_btn = QToolButton()
         self.banner_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -1073,7 +1076,8 @@ class SegmentViewer(QMainWindow):
         left_panel_layout.addWidget(self.signal_group)
 
         left_panel_layout.addStretch()
-        main_layout_container.addWidget(left_panel)
+        left_panel_scroll.setWidget(left_panel)
+        main_layout_container.addWidget(left_panel_scroll)
 
         # Right side: Main content area
         right_panel = QWidget()
@@ -2808,12 +2812,9 @@ class SegmentViewer(QMainWindow):
         # Update window controls to reflect current position
         self.update_window_controls_from_view()
 
-        # Throttle FFT/band power updates (~3 Hz)
-        self.fft_update_counter += 1
-        if self.fft_update_counter >= 5:
-            self.fft_update_counter = 0
-            self.calculate_fft_for_file()
-            self.calculate_band_power_for_file()
+        # Update FFT and band power every frame for smooth display
+        self.calculate_fft_for_file()
+        self.calculate_band_power_for_file()
 
     def open_settings_dialog(self):
         """Open dialog to configure application settings"""
@@ -2971,6 +2972,20 @@ class SegmentViewer(QMainWindow):
         self._reset_connect_btn()
 
     # ── connection helpers ─────────────────────────────────────────────────────
+
+    def _show_about_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("About")
+        dlg.setMinimumWidth(300)
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel("<b>Longhorn Neural Interface Platform</b>"))
+        layout.addWidget(QLabel(f"Version: {CURRENT_VERSION}"))
+        layout.addWidget(QLabel("© LonghornNeurotech"))
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        btns.accepted.connect(dlg.accept)
+        layout.addWidget(btns)
+        dlg.exec()
 
     def _reset_connect_btn(self):
         """Restore the connect button to its idle state."""
@@ -3651,12 +3666,9 @@ class SegmentViewer(QMainWindow):
                 # Update plots (every frame for smooth time-domain display)
                 self.update_streaming_plots()
 
-                # Throttle FFT and band power updates (expensive, ~20Hz is enough)
-                self.fft_update_counter += 1
-                if self.fft_update_counter >= self.fft_update_interval:
-                    self.fft_update_counter = 0
-                    self.update_fft()
-                    self.update_band_power()
+                # Update FFT and band power every frame for smooth display
+                self.update_fft()
+                self.update_band_power()
 
         except Exception as e:
             print(f"Error updating stream: {str(e)}")

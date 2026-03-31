@@ -49,11 +49,10 @@ def _find_platform_asset(assets: list[dict]) -> tuple[str | None, str | None]:
     """
     system = platform.system()
 
-    # (substring the asset name must contain, required extension)
     if system == "Darwin":
         matchers = [("macOS", ".zip"), ("Darwin", ".zip"), ("mac", ".zip")]
     elif system == "Windows":
-        matchers = [("Windows", ".exe"), ("Win", ".exe")]
+        matchers = [("Setup", ".exe"), ("Windows", ".exe"), ("Win", ".exe")]
     else:
         matchers = [("Linux", ""), ("linux", "")]
 
@@ -131,18 +130,61 @@ def _download_worker(url: str, dest: str, signals: _DownloadSignals):
 
 # ── platform-specific updaters ────────────────────────────────────────────────
 
+def _get_nsis_install_dir() -> str | None:
+    """Return the NSIS install directory from the registry, or None.
+
+    Checks both the native 64-bit registry view and the WOW64 32-bit view
+    so it works regardless of whether NSIS was 32-bit or 64-bit.
+    """
+    if platform.system() != "Windows":
+        return None
+    try:
+        import winreg
+        for access_flag in (0, winreg.KEY_WOW64_32KEY):
+            try:
+                key = winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\NeuroTechGUI",
+                    0,
+                    winreg.KEY_READ | access_flag,
+                )
+                path, _ = winreg.QueryValueEx(key, "InstallPath")
+                winreg.CloseKey(key)
+                return path
+            except (FileNotFoundError, OSError):
+                continue
+    except Exception:
+        pass
+    return None
+
+
 def _apply_update_windows(downloaded_path: str):
-    """Spawn a .bat script that replaces the exe and restarts it."""
-    current_exe = sys.executable
+    """Run the downloaded NSIS installer silently, then relaunch the app."""
     updater_bat = os.path.join(tempfile.gettempdir(), "neurotechgui_updater.bat")
 
-    bat = f"""@echo off
-timeout /t 2 /nobreak > NUL
-move /y "{downloaded_path}" "{current_exe}"
-start "" "{current_exe}"
-del "%~f0"
-"""
-    with open(updater_bat, "w") as f:
+    install_dir = _get_nsis_install_dir()
+    if not install_dir:
+        install_dir = os.path.join(
+            os.environ.get("PROGRAMFILES", "C:\\Program Files"), "NeuroTechGUI"
+        )
+    install_dir = install_dir.rstrip("\\")
+
+    # Run installer synchronously (no `start`), then glob for the new exe
+    # and relaunch it.  The NSIS script deletes old exes before installing,
+    # so only the freshly-installed exe will match the glob.
+    bat = (
+        '@echo off\r\n'
+        'timeout /t 2 /nobreak > NUL\r\n'
+        f'"{downloaded_path}" /S\r\n'
+        'timeout /t 2 /nobreak > NUL\r\n'
+        f'for %%f in ("{install_dir}\\LonghornNeuralInterface_*.exe") do (\r\n'
+        '    start "" "%%f"\r\n'
+        '    goto :done\r\n'
+        ')\r\n'
+        ':done\r\n'
+        'del "%~f0"\r\n'
+    )
+    with open(updater_bat, "w", newline="") as f:
         f.write(bat)
 
     subprocess.Popen(
