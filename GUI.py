@@ -4025,7 +4025,7 @@ class SegmentViewer(QMainWindow):
                 fft_power = 20 * np.log10(np.abs(fft_vals) * 2.0 / np.sum(window) + 1e-10)
 
                 # Temporal EMA smoothing
-                mask = fft_freq <= 50
+                mask = (fft_freq >= self.fft_min_freq) & (fft_freq <= self.fft_max_freq)
                 new_fft = fft_power[mask]
                 if ch_idx in self.smoothed_fft:
                     self.smoothed_fft[ch_idx] = (
@@ -4657,7 +4657,7 @@ class SegmentViewer(QMainWindow):
                 fft_power = 20 * np.log10(np.abs(fft_vals) * 2.0 / np.sum(window) + 1e-10)
 
                 # Temporal EMA smoothing
-                mask = fft_freq <= 50
+                mask = (fft_freq >= self.fft_min_freq) & (fft_freq <= self.fft_max_freq)
                 new_fft_data = fft_power[mask]
 
                 # Check if smoothed buffer exists and has correct shape
