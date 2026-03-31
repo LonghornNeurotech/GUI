@@ -1062,6 +1062,9 @@ class SegmentViewer(QMainWindow):
         filter_reorder_row.addStretch()
         filter_group_layout.addLayout(filter_reorder_row)
 
+        # Store filter button references for theme switching
+        self._filter_buttons = [_add_bp_btn, _add_notch_btn, _remove_btn, _up_btn, _down_btn]
+
         filter_group.setLayout(filter_group_layout)
         signal_layout.addWidget(filter_group)
 
@@ -4335,6 +4338,23 @@ class SegmentViewer(QMainWindow):
                     }
                 """)
 
+            # Per-widget dark overrides -- filter buttons
+            if hasattr(self, '_filter_buttons'):
+                _dark_btn_style = """
+                    QPushButton {
+                        background: #3d3d3d;
+                        color: #e6e6e6;
+                        border: 1px solid #555555;
+                        border-radius: 3px;
+                        padding: 3px 6px;
+                        font-size: 11px;
+                    }
+                    QPushButton:hover { background: #4a4a4a; }
+                    QPushButton:pressed { background: #2a2a2a; }
+                """
+                for btn in self._filter_buttons:
+                    btn.setStyleSheet(_dark_btn_style)
+
         else:
             # Light theme — clean white with Longhorn palette accents
             # 213C58 = dark navy, 598BBC = steel blue, F9F6EE = warm off-white
@@ -4437,6 +4457,23 @@ class SegmentViewer(QMainWindow):
                         color: white;
                     }
                 """)
+
+            # Per-widget light overrides -- filter buttons
+            if hasattr(self, '_filter_buttons'):
+                _light_btn_style = """
+                    QPushButton {
+                        background: #F9F6EE;
+                        color: #213C58;
+                        border: 1px solid #598BBC;
+                        border-radius: 3px;
+                        padding: 3px 6px;
+                        font-size: 11px;
+                    }
+                    QPushButton:hover { background: #e8f0f8; }
+                    QPushButton:pressed { background: #d0e0f0; }
+                """
+                for btn in self._filter_buttons:
+                    btn.setStyleSheet(_light_btn_style)
 
         # Regenerate channel colors for the new theme
         self.generate_channel_colors()
