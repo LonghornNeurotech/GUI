@@ -3695,6 +3695,32 @@ class SegmentViewer(QMainWindow):
         return processed
 
     # ------------------------------------------------------------------
+    # FFT frequency range slot methods
+    # ------------------------------------------------------------------
+
+    def _on_fft_min_changed(self, value: float) -> None:
+        """Update FFT min frequency; clamp to max - 1.0."""
+        if value >= self.fft_max_freq:
+            value = self.fft_max_freq - 1.0
+            self.fft_min_spinbox.blockSignals(True)
+            self.fft_min_spinbox.setValue(value)
+            self.fft_min_spinbox.blockSignals(False)
+        self.fft_min_freq = value
+        self.smoothed_fft.clear()
+        self.update_fft()
+
+    def _on_fft_max_changed(self, value: float) -> None:
+        """Update FFT max frequency; clamp min if needed."""
+        if value <= self.fft_min_freq:
+            value = self.fft_min_freq + 1.0
+            self.fft_max_spinbox.blockSignals(True)
+            self.fft_max_spinbox.setValue(value)
+            self.fft_max_spinbox.blockSignals(False)
+        self.fft_max_freq = value
+        self.smoothed_fft.clear()
+        self.update_fft()
+
+    # ------------------------------------------------------------------
     # Filter UI slot methods
     # ------------------------------------------------------------------
 
@@ -4356,6 +4382,14 @@ class SegmentViewer(QMainWindow):
                 QMessageBox { background-color: #2a2a2a; color: #e6e6e6; }
                 QMessageBox QLabel { color: #e6e6e6; }
                 QDialog { background-color: #2a2a2a; color: #e6e6e6; }
+                QScrollBar:vertical { background: #2a2a2a; width: 12px; border: none; }
+                QScrollBar::handle:vertical { background: #555555; min-height: 20px; border-radius: 4px; margin: 2px; }
+                QScrollBar::handle:vertical:hover { background: #598BBC; }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+                QScrollBar:horizontal { background: #2a2a2a; height: 12px; border: none; }
+                QScrollBar::handle:horizontal { background: #555555; min-width: 20px; border-radius: 4px; margin: 2px; }
+                QScrollBar::handle:horizontal:hover { background: #598BBC; }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }
             """)
 
             # Per-widget dark overrides -- filter list
