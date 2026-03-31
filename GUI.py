@@ -682,7 +682,7 @@ class SegmentViewer(QMainWindow):
         # Higher alpha = more responsive to current data; frequency-domain smoothing handles visual smoothness
         self.fft_smoothing_alpha = 0.4
         self.band_power_smoothing_alpha = 0.4
-        self.fft_min_freq = 0.0
+        self.fft_min_freq = 1.0
         self.fft_max_freq = 50.0
         self.smoothed_fft = {}  # Stores smoothed FFT for each channel
         self.smoothed_band_power = {}  # Stores smoothed band power
@@ -976,8 +976,8 @@ class SegmentViewer(QMainWindow):
         signal_layout.addLayout(smooth_layout)
 
         # --- Filter chain sub-panel ---
-        filter_group = QGroupBox("Filters")
-        filter_group.setStyleSheet("""
+        self.filter_group = QGroupBox("Filters")
+        self.filter_group.setStyleSheet("""
             QGroupBox {
                 font-weight: bold;
                 font-size: 11px;
@@ -1065,8 +1065,8 @@ class SegmentViewer(QMainWindow):
         # Store filter button references for theme switching
         self._filter_buttons = [_add_bp_btn, _add_notch_btn, _remove_btn, _up_btn, _down_btn]
 
-        filter_group.setLayout(filter_group_layout)
-        signal_layout.addWidget(filter_group)
+        self.filter_group.setLayout(filter_group_layout)
+        signal_layout.addWidget(self.filter_group)
 
         self.signal_group.setLayout(signal_layout)
         self.signal_group.setEnabled(False)
@@ -1280,6 +1280,42 @@ class SegmentViewer(QMainWindow):
         # FFT tab
         fft_tab = QWidget()
         fft_layout = QVBoxLayout(fft_tab)
+
+        # Frequency range row
+        fft_range_row = QHBoxLayout()
+        fft_range_row.setSpacing(4)
+
+        fft_min_label = QLabel("Min:")
+        fft_min_label.setObjectName("fft_min_label")
+        fft_range_row.addWidget(fft_min_label)
+
+        self.fft_min_spinbox = QDoubleSpinBox()
+        self.fft_min_spinbox.setRange(0.0, 999.0)
+        self.fft_min_spinbox.setSingleStep(0.5)
+        self.fft_min_spinbox.setDecimals(1)
+        self.fft_min_spinbox.setSuffix(" Hz")
+        self.fft_min_spinbox.setValue(1.0)
+        self.fft_min_spinbox.valueChanged.connect(self._on_fft_min_changed)
+        fft_range_row.addWidget(self.fft_min_spinbox)
+
+        fft_max_label = QLabel("Max:")
+        fft_max_label.setObjectName("fft_max_label")
+        fft_range_row.addWidget(fft_max_label)
+
+        self.fft_max_spinbox = QDoubleSpinBox()
+        self.fft_max_spinbox.setRange(0.0, 999.0)
+        self.fft_max_spinbox.setSingleStep(0.5)
+        self.fft_max_spinbox.setDecimals(1)
+        self.fft_max_spinbox.setSuffix(" Hz")
+        self.fft_max_spinbox.setValue(50.0)
+        self.fft_max_spinbox.valueChanged.connect(self._on_fft_max_changed)
+        fft_range_row.addWidget(self.fft_max_spinbox)
+
+        fft_range_row.addSpacerItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        )
+        fft_layout.addLayout(fft_range_row)
+
         self.fft_plot_widget = pg.PlotWidget()
         self.fft_plot_widget.setLabel('bottom', 'Frequency (Hz)')
         self.fft_plot_widget.setLabel('left', 'Power (dB)')
@@ -4355,6 +4391,26 @@ class SegmentViewer(QMainWindow):
                 for btn in self._filter_buttons:
                     btn.setStyleSheet(_dark_btn_style)
 
+            # Per-widget dark overrides -- filter group box
+            if hasattr(self, 'filter_group'):
+                self.filter_group.setStyleSheet("""
+                    QGroupBox {
+                        font-weight: bold;
+                        font-size: 11px;
+                        color: #e6e6e6;
+                        border: 1px solid #3a3a3a;
+                        border-radius: 4px;
+                        margin-top: 6px;
+                        padding-top: 4px;
+                    }
+                    QGroupBox::title {
+                        subcontrol-origin: margin;
+                        subcontrol-position: top left;
+                        padding: 0 4px;
+                        color: #e6e6e6;
+                    }
+                """)
+
         else:
             # Light theme — clean white with Longhorn palette accents
             # 213C58 = dark navy, 598BBC = steel blue, F9F6EE = warm off-white
@@ -4474,6 +4530,25 @@ class SegmentViewer(QMainWindow):
                 """
                 for btn in self._filter_buttons:
                     btn.setStyleSheet(_light_btn_style)
+
+            # Per-widget light overrides -- filter group box
+            if hasattr(self, 'filter_group'):
+                self.filter_group.setStyleSheet("""
+                    QGroupBox {
+                        font-weight: bold;
+                        font-size: 11px;
+                        color: #213C58;
+                        border: 1px solid #598BBC;
+                        border-radius: 4px;
+                        margin-top: 6px;
+                        padding-top: 4px;
+                    }
+                    QGroupBox::title {
+                        subcontrol-origin: margin;
+                        subcontrol-position: top left;
+                        padding: 0 4px;
+                    }
+                """)
 
         # Regenerate channel colors for the new theme
         self.generate_channel_colors()
