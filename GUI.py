@@ -618,10 +618,6 @@ class SegmentViewer(QMainWindow):
             'beta': {},   # 13-30 Hz
             'gamma': {}   # 30-50 Hz
         }
-        # Throttle FFT/band power updates (these are expensive, no need at 60Hz)
-        self.fft_update_counter = 0
-        self.fft_update_interval = 3  # Update FFT every 3rd frame (~20Hz)
-
         # Smoothing for FFT and band power
         # Higher alpha = more responsive to current data; frequency-domain smoothing handles visual smoothness
         self.fft_smoothing_alpha = 0.2
@@ -2581,12 +2577,9 @@ class SegmentViewer(QMainWindow):
         # Update window controls to reflect current position
         self.update_window_controls_from_view()
 
-        # Throttle FFT/band power updates (~3 Hz)
-        self.fft_update_counter += 1
-        if self.fft_update_counter >= 5:
-            self.fft_update_counter = 0
-            self.calculate_fft_for_file()
-            self.calculate_band_power_for_file()
+        # Update FFT and band power every frame for smooth display
+        self.calculate_fft_for_file()
+        self.calculate_band_power_for_file()
 
     def open_settings_dialog(self):
         """Open dialog to configure application settings"""
