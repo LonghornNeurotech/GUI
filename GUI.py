@@ -3413,12 +3413,9 @@ class SegmentViewer(QMainWindow):
                 # Update plots (every frame for smooth time-domain display)
                 self.update_streaming_plots()
 
-                # Throttle FFT and band power updates (expensive, ~20Hz is enough)
-                self.fft_update_counter += 1
-                if self.fft_update_counter >= self.fft_update_interval:
-                    self.fft_update_counter = 0
-                    self.update_fft()
-                    self.update_band_power()
+                # Update FFT and band power every frame for smooth display
+                self.update_fft()
+                self.update_band_power()
 
         except Exception as e:
             print(f"Error updating stream: {str(e)}")
