@@ -3666,9 +3666,12 @@ class SegmentViewer(QMainWindow):
                 # Update plots (every frame for smooth time-domain display)
                 self.update_streaming_plots()
 
-                # Update FFT and band power every frame for smooth display
-                self.update_fft()
-                self.update_band_power()
+                # Update FFT and band power every frame -- only when tab visible
+                current_tab = self.viz_tabs.currentIndex()
+                if current_tab == 1:  # FFT tab
+                    self.update_fft()
+                if current_tab == 2:  # Band Power tab
+                    self.update_band_power()
 
         except Exception as e:
             print(f"Error updating stream: {str(e)}")
