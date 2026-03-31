@@ -55,10 +55,10 @@ def _attach_handlers(stub: _EEGViewerStub) -> None:
     # or ImportError when the methods don't exist yet).
     import GUI as gui_module
     stub._on_fft_min_changed = types.MethodType(
-        gui_module.EEGViewer._on_fft_min_changed, stub
+        gui_module.SegmentViewer._on_fft_min_changed, stub
     )
     stub._on_fft_max_changed = types.MethodType(
-        gui_module.EEGViewer._on_fft_max_changed, stub
+        gui_module.SegmentViewer._on_fft_max_changed, stub
     )
 
 
