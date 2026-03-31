@@ -19,10 +19,10 @@
 ### GUI Visualization & UX
 
 - [x] **UX-01**: FFT plot has user-configurable min/max frequency range (spinboxes above the plot)
-- [ ] **UX-02**: FFT and band power plots update every frame for smooth realtime display (no throttle)
+- [x] **UX-02**: FFT and band power plots update every frame for smooth realtime display (no throttle)
 - [x] **UX-03**: Dark mode: filter list widget uses dark background with light text (no white-on-white)
 - [x] **UX-04**: Dark mode: scrollbars, input fields, spinboxes have consistent dark styling
-- [ ] **UX-05**: All channels selected by default in file mode (matching streaming mode behavior)
+- [x] **UX-05**: All channels selected by default in file mode (matching streaming mode behavior)
 
 ### Spatial Filters
 
@@ -129,7 +129,7 @@
 | FILT-07 | Phase 1 | Complete |
 | FILT-08 | Phase 1 | Complete |
 | UX-01 | Phase 1.5 | Complete |
-| UX-02 | Phase 1.5 | Pending |
+| UX-02 | Phase 1.5 | Complete |
 | UX-03 | Phase 1.5 | Complete |
 | UX-04 | Phase 1.5 | Complete |
 | UX-05 | Phase 1.5 | Complete |
