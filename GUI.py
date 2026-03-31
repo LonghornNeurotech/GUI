@@ -336,11 +336,13 @@ class XDFRecorder:
         self.channel_names = channel_names or [f"Ch{i + 1}" for i in range(num_channels)]
         self._recording = False
         self._eeg_samples = []    # [(timestamp: float, values: list[float])]
+        self._filtered_samples = []  # [(timestamp: float, values: list[float])]
         self._marker_samples = [] # [(timestamp: float, text: str)]
 
     def start(self):
         self._recording = True
         self._eeg_samples = []
+        self._filtered_samples = []
         self._marker_samples = []
         print(f"[XDF] Recording started → {self.filepath}")
 
@@ -358,6 +360,17 @@ class XDFRecorder:
             return
         for ts, row in zip(timestamps, samples):
             self._eeg_samples.append((ts, row))
+
+    def push_filtered_eeg(self, timestamps, samples):
+        """Append a batch of filtered EEG samples.
+
+        timestamps : list of float (Unix seconds, one per sample)
+        samples    : list of list[float], shape (n_samples, n_channels)
+        """
+        if not self._recording:
+            return
+        for ts, row in zip(timestamps, samples):
+            self._filtered_samples.append((ts, row))
 
     def push_marker(self, timestamp, text):
         """Append a single marker event."""
@@ -389,9 +402,12 @@ class XDFRecorder:
 
     def _write_xdf(self):
         eeg_samples = list(self._eeg_samples)
+        filtered_samples = list(self._filtered_samples)
         marker_samples = list(self._marker_samples)
+        has_filtered = len(filtered_samples) > 0
 
-        print(f"[XDF] Writing {len(eeg_samples)} EEG samples, "
+        print(f"[XDF] Writing {len(eeg_samples)} raw EEG, "
+              f"{len(filtered_samples)} filtered EEG, "
               f"{len(marker_samples)} markers → {self.filepath}")
 
         os.makedirs(os.path.dirname(os.path.abspath(self.filepath)), exist_ok=True)
@@ -404,7 +420,7 @@ class XDFRecorder:
             self._write_chunk(f, 1,
                 '<?xml version="1.0"?><info><version>1.0</version></info>')
 
-            # EEG StreamHeader  (tag 2, stream_id = 1)
+            # ── Stream 1: Raw EEG ────────────────────────────────────────
             ch_xml = ''.join(
                 f'<channel><label>{name}</label>'
                 f'<type>EEG</type><unit>microvolts</unit></channel>'
@@ -422,7 +438,7 @@ class XDFRecorder:
             )
             self._write_chunk(f, 2, struct.pack('<I', 1) + eeg_hdr.encode('utf-8'))
 
-            # Marker StreamHeader  (tag 2, stream_id = 2)
+            # ── Stream 2: Markers ────────────────────────────────────────
             mk_hdr = (
                 '<?xml version="1.0"?><info>'
                 f'<name>{self.marker_stream_name}</name>'
@@ -434,7 +450,27 @@ class XDFRecorder:
             )
             self._write_chunk(f, 2, struct.pack('<I', 2) + mk_hdr.encode('utf-8'))
 
-            # EEG Samples chunk  (tag 3, stream_id = 1)
+            # ── Stream 3: Filtered EEG (only if filters were active) ─────
+            if has_filtered:
+                filt_ch_xml = ''.join(
+                    f'<channel><label>{name}</label>'
+                    f'<type>EEG</type><unit>microvolts</unit></channel>'
+                    for name in self.channel_names[:self.num_channels]
+                )
+                filt_name = self.eeg_stream_name + "_Filtered"
+                filt_hdr = (
+                    f'<?xml version="1.0"?><info>'
+                    f'<name>{filt_name}</name>'
+                    f'<type>Filtered_EEG</type>'
+                    f'<channel_count>{self.num_channels}</channel_count>'
+                    f'<nominal_srate>{self.srate}</nominal_srate>'
+                    f'<channel_format>float32</channel_format>'
+                    f'<channels>{filt_ch_xml}</channels>'
+                    f'</info>'
+                )
+                self._write_chunk(f, 2, struct.pack('<I', 3) + filt_hdr.encode('utf-8'))
+
+            # ── Raw EEG Samples (tag 3, stream_id = 1) ───────────────────
             if eeg_samples:
                 buf = bytearray()
                 buf += struct.pack('<I', 1)
@@ -445,7 +481,7 @@ class XDFRecorder:
                     buf += struct.pack(f'<{self.num_channels}f', *vals)
                 self._write_chunk(f, 3, bytes(buf))
 
-            # Marker Samples chunk  (tag 3, stream_id = 2)
+            # ── Marker Samples (tag 3, stream_id = 2) ────────────────────
             # XDF string channels use the same varlen scheme for the per-value
             # length prefix (indicator byte + 1/4/8 value bytes), NOT plain uint32.
             if marker_samples:
@@ -459,7 +495,18 @@ class XDFRecorder:
                     buf += encoded
                 self._write_chunk(f, 3, bytes(buf))
 
-            # EEG StreamFooter  (tag 6, stream_id = 1)
+            # ── Filtered EEG Samples (tag 3, stream_id = 3) ──────────────
+            if has_filtered:
+                buf = bytearray()
+                buf += struct.pack('<I', 3)
+                buf += self._encode_varlen(len(filtered_samples))
+                for ts, values in filtered_samples:
+                    buf += struct.pack('<Bd', 8, ts)
+                    vals = (list(values) + [0.0] * self.num_channels)[:self.num_channels]
+                    buf += struct.pack(f'<{self.num_channels}f', *vals)
+                self._write_chunk(f, 3, bytes(buf))
+
+            # ── Raw EEG StreamFooter (tag 6, stream_id = 1) ──────────────
             first_eeg = eeg_samples[0][0] if eeg_samples else 0.0
             last_eeg  = eeg_samples[-1][0] if eeg_samples else 0.0
             eeg_ftr = (
@@ -471,7 +518,7 @@ class XDFRecorder:
             )
             self._write_chunk(f, 6, struct.pack('<I', 1) + eeg_ftr.encode('utf-8'))
 
-            # Marker StreamFooter  (tag 6, stream_id = 2)
+            # ── Marker StreamFooter (tag 6, stream_id = 2) ───────────────
             first_mk = marker_samples[0][0] if marker_samples else 0.0
             last_mk  = marker_samples[-1][0] if marker_samples else 0.0
             mk_ftr = (
@@ -482,6 +529,19 @@ class XDFRecorder:
                 f'</info>'
             )
             self._write_chunk(f, 6, struct.pack('<I', 2) + mk_ftr.encode('utf-8'))
+
+            # ── Filtered EEG StreamFooter (tag 6, stream_id = 3) ─────────
+            if has_filtered:
+                first_filt = filtered_samples[0][0] if filtered_samples else 0.0
+                last_filt  = filtered_samples[-1][0] if filtered_samples else 0.0
+                filt_ftr = (
+                    f'<?xml version="1.0"?><info>'
+                    f'<first_timestamp>{first_filt}</first_timestamp>'
+                    f'<last_timestamp>{last_filt}</last_timestamp>'
+                    f'<sample_count>{len(filtered_samples)}</sample_count>'
+                    f'</info>'
+                )
+                self._write_chunk(f, 6, struct.pack('<I', 3) + filt_ftr.encode('utf-8'))
 
         print(f"[XDF] Saved: {self.filepath}")
 
@@ -620,8 +680,10 @@ class SegmentViewer(QMainWindow):
 
         # Smoothing for FFT and band power
         # Higher alpha = more responsive to current data; frequency-domain smoothing handles visual smoothness
-        self.fft_smoothing_alpha = 0.2
-        self.band_power_smoothing_alpha = 0.2
+        self.fft_smoothing_alpha = 0.4
+        self.band_power_smoothing_alpha = 0.4
+        self.fft_min_freq = 0.0
+        self.fft_max_freq = 50.0
         self.smoothed_fft = {}  # Stores smoothed FFT for each channel
         self.smoothed_band_power = {}  # Stores smoothed band power
         self.band_power_y_max = 0.0  # Stable Y-axis max for band power
@@ -942,6 +1004,7 @@ class SegmentViewer(QMainWindow):
         self.filter_list_widget.setStyleSheet("""
             QListWidget {
                 background: #ffffff;
+                color: #213C58;
                 border: 1px solid #598BBC;
                 border-radius: 3px;
                 font-size: 11px;
@@ -1432,8 +1495,8 @@ class SegmentViewer(QMainWindow):
             # Enable navigation
             self.nav_widget.setEnabled(True)
             
-            # Initialize with first channel selected
-            self.channel_checkboxes[0].setChecked(True)
+            # Select all channels by default
+            self.select_all_checkbox.setChecked(True)
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load file:\n{str(e)}")
@@ -1449,8 +1512,10 @@ class SegmentViewer(QMainWindow):
         """
         streams, _ = pyxdf.load_xdf(path)
 
-        # Pick the EEG stream: prefer type='EEG', else the numeric stream with most channels
+        # Pick the EEG stream: prefer Filtered_EEG, then type='EEG',
+        # else the numeric stream with the most channels.
         eeg_stream = None
+        filtered_stream = None
         for s in streams:
             stype = s['info']['type'][0].upper()
             fmt   = s['info'].get('channel_format', ['string'])[0]
@@ -1459,12 +1524,18 @@ class SegmentViewer(QMainWindow):
             ts = s['time_stamps']
             if ts is None or len(ts) == 0:
                 continue
+            if stype == 'FILTERED_EEG':
+                filtered_stream = s
+                continue
             if stype == 'EEG':
                 eeg_stream = s
-                break
+                continue
             n_ch = int(s['info']['channel_count'][0])
             if eeg_stream is None or n_ch > int(eeg_stream['info']['channel_count'][0]):
                 eeg_stream = s
+
+        # Use filtered stream when available, fall back to raw
+        eeg_stream = filtered_stream or eeg_stream
 
         if eeg_stream is None:
             raise ValueError("No EEG stream with samples found in the XDF file.")
@@ -3490,12 +3561,29 @@ class SegmentViewer(QMainWindow):
                     timestamps = data[ts_ch, :].tolist()
                     self.xdf_recorder.push_eeg(timestamps, eeg_list)
 
+            # --- Apply filtering (bandpass, notch with stateful filters) ---
+            if len(self.filter_pipeline) > 0:
+                filtered_data = self.filter_pipeline.process_chunk(eeg_data)
+            else:
+                filtered_data = eeg_data
+
+            # Push filtered data to XDF recorder (alongside the raw stream).
+            # Uses filter-only output -- no display magnitude scaling.
+            if self.xdf_recorder is not None and len(self.filter_pipeline) > 0:
+                filt_list = filtered_data.T.tolist()
+                if self.headset_source == 'lsl_inlet':
+                    filt_ts = timestamps_lsl if timestamps_lsl else (
+                        [time.time()] * filtered_data.shape[1])
+                else:
+                    filt_ts = data[ts_ch, :].tolist()
+                self.xdf_recorder.push_filtered_eeg(filt_ts, filt_list)
+
+            # Apply magnitude scaling for display only
+            processed_data = filtered_data * (self.magnitude_scale / 100.0)
+
             # --- Everything below is visualization-only ---
             if not self.streaming_active:
                 return
-
-            # Apply signal processing (bandpass, notch with stateful filters)
-            processed_data = self.process_signal(eeg_data)
 
             # Discard initial samples while filters settle (avoids startup transient spike)
             if self.stream_warmup_remaining > 0:
@@ -4231,6 +4319,22 @@ class SegmentViewer(QMainWindow):
                 QDialog { background-color: #2a2a2a; color: #e6e6e6; }
             """)
 
+            # Per-widget dark overrides -- filter list
+            if hasattr(self, 'filter_list_widget'):
+                self.filter_list_widget.setStyleSheet("""
+                    QListWidget {
+                        background: #1e1e2e;
+                        color: #e0e0e0;
+                        border: 1px solid #598BBC;
+                        border-radius: 3px;
+                        font-size: 11px;
+                    }
+                    QListWidget::item:selected {
+                        background: #598BBC;
+                        color: #ffffff;
+                    }
+                """)
+
         else:
             # Light theme — clean white with Longhorn palette accents
             # 213C58 = dark navy, 598BBC = steel blue, F9F6EE = warm off-white
@@ -4317,6 +4421,22 @@ class SegmentViewer(QMainWindow):
                 QDialog { background-color: #ffffff; color: #1c2833; }
                 QScrollArea { border: none; background: transparent; }
             """)
+
+            # Per-widget light overrides -- filter list
+            if hasattr(self, 'filter_list_widget'):
+                self.filter_list_widget.setStyleSheet("""
+                    QListWidget {
+                        background: #ffffff;
+                        color: #213C58;
+                        border: 1px solid #598BBC;
+                        border-radius: 3px;
+                        font-size: 11px;
+                    }
+                    QListWidget::item:selected {
+                        background: #598BBC;
+                        color: white;
+                    }
+                """)
 
         # Regenerate channel colors for the new theme
         self.generate_channel_colors()
