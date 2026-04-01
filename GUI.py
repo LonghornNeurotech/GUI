@@ -97,7 +97,10 @@ except ImportError:
 from conversions import get_gdf_array, get_pkl_array
 
 # Filter pipeline (DSP core)
-from dsp.filter_pipeline import FilterPipeline
+from dsp.filter_pipeline import FilterPipeline, SpatialFilterStage
+
+# Signal quality monitor
+from dsp.quality import SignalQualityMonitor
 
 # Auto-updater
 from updater import prompt_update_if_available, check_for_updates, apply_update
@@ -546,6 +549,140 @@ class XDFRecorder:
         print(f"[XDF] Saved: {self.filepath}")
 
 
+# ---------------------------------------------------------------------------
+# Quality-aware Y-axis: colours tick labels by channel quality
+# ---------------------------------------------------------------------------
+
+class QualityAxisItem(pg.AxisItem):
+    """Y-axis that colours tick labels according to per-channel signal quality.
+
+    Colours:
+        good     -- #3dba55 (green)
+        marginal -- #f5c842 (amber)
+        bad      -- #e04040 (red)
+        idle     -- #555555 (gray, when not streaming)
+    """
+
+    QUALITY_COLORS: dict[str, str] = {
+        "good": "#3dba55",
+        "marginal": "#f5c842",
+        "bad": "#e04040",
+        "idle": "#555555",
+    }
+
+    def __init__(self, orientation: str = "left", **kwargs) -> None:  # type: ignore[override]
+        super().__init__(orientation, **kwargs)
+        # Maps tick label text -> quality key
+        self._label_quality: dict[str, str] = {}
+
+    def set_quality_map(self, mapping: dict[str, str]) -> None:
+        """Update the label->quality mapping and trigger a repaint."""
+        self._label_quality = dict(mapping)
+        self.picture = None  # force redraw
+        self.update()
+
+    def drawPicture(self, p, axisSpec, tickSpecs, textSpecs):  # type: ignore[override]
+        """Override to inject per-label colour from the quality map."""
+        from PyQt6.QtGui import QPen
+
+        # Draw axis line and tick marks using the default implementation
+        super().drawPicture(p, axisSpec, tickSpecs, [])
+
+        # Draw text specs with quality-aware colours
+        for rect, flags, text in textSpecs:
+            quality = self._label_quality.get(text, "idle")
+            color_hex = self.QUALITY_COLORS.get(quality, self.QUALITY_COLORS["idle"])
+            p.setPen(QPen(QColor(color_hex)))
+            p.drawText(rect, int(flags), text)
+
+
+# ---------------------------------------------------------------------------
+# Laplacian neighbour configuration dialog
+# ---------------------------------------------------------------------------
+
+# Default Cyton-8 neighbours (used as initial values)
+CYTON8_LAPLACIAN_DEFAULTS: dict[int, list[int]] = {
+    0: [1, 4], 1: [0, 2, 5], 2: [1, 3, 6], 3: [2, 7],
+    4: [0, 5], 5: [1, 4, 6], 6: [2, 5, 7], 7: [3, 6],
+}
+
+
+class LaplacianConfigDialog(QDialog):
+    """Per-channel neighbour selection for surface Laplacian filter."""
+
+    def __init__(
+        self,
+        n_channels: int,
+        channel_names: list[str],
+        current_neighbors: dict[int, list[int]] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Laplacian Neighbour Configuration")
+        self.setMinimumWidth(380)
+        self.n_channels = n_channels
+        self.channel_names = channel_names
+        # Start from current config or Cyton-8 defaults (trimmed to n_channels)
+        if current_neighbors is not None:
+            self._neighbors = {k: list(v) for k, v in current_neighbors.items()}
+        else:
+            self._neighbors = {
+                k: [n for n in v if n < n_channels]
+                for k, v in CYTON8_LAPLACIAN_DEFAULTS.items()
+                if k < n_channels
+            }
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Select neighbours for each channel:"))
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        grid = QGridLayout(content)
+        grid.setSpacing(4)
+
+        self._checkboxes: dict[int, list[QCheckBox]] = {}
+        for ch in range(n_channels):
+            label = QLabel(f"{channel_names[ch]}:")
+            label.setMinimumWidth(60)
+            grid.addWidget(label, ch, 0)
+            cbs: list[QCheckBox] = []
+            for nbr in range(n_channels):
+                if nbr == ch:
+                    continue
+                cb = QCheckBox(channel_names[nbr])
+                cb.setChecked(nbr in self._neighbors.get(ch, []))
+                cbs.append(cb)
+                grid.addWidget(cb, ch, nbr + 1 if nbr < ch else nbr)
+            self._checkboxes[ch] = cbs
+
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def get_neighbors(self) -> dict[int, list[int]]:
+        """Return the selected neighbour map."""
+        result: dict[int, list[int]] = {}
+        for ch, cbs in self._checkboxes.items():
+            nbr_indices: list[int] = []
+            nbr_idx = 0
+            for candidate in range(self.n_channels):
+                if candidate == ch:
+                    continue
+                if cbs[nbr_idx].isChecked():
+                    nbr_indices.append(candidate)
+                nbr_idx += 1
+            if nbr_indices:
+                result[ch] = nbr_indices
+        return result
+
+
 class SegmentViewer(QMainWindow):
     def __init__(self, window_size_sec=10.0, sampling_rate=125):
         super().__init__()
@@ -659,6 +796,22 @@ class SegmentViewer(QMainWindow):
 
         # Filter pipeline (replaces old lfilter-based filter state)
         self.filter_pipeline = FilterPipeline()
+
+        # Spatial filter stage (CAR / Laplacian -- applied after IIR pipeline)
+        self.spatial_filter: SpatialFilterStage | None = None
+        self._laplacian_neighbors: dict[int, list[int]] | None = None
+
+        # Signal quality monitor and per-channel quality state
+        self.quality_monitor = SignalQualityMonitor()
+        self._channel_quality: dict[int, str] = {}  # ch_idx -> "good"/"marginal"/"bad"/"idle"
+        self._quality_dots: list[QLabel] = []
+        self._quality_timer = QTimer()
+        self._quality_timer.setInterval(500)
+        self._quality_timer.timeout.connect(self._update_quality)
+
+        # Channel mapping (C3 / C4 for motor imagery)
+        self._c3_channel: int = 0
+        self._c4_channel: int = 1
 
         # Streaming plot item references (reused to avoid memory leak)
         self.streaming_plot_items = {}  # Channel index -> PlotDataItem
@@ -1074,6 +1227,58 @@ class SegmentViewer(QMainWindow):
         self.signal_group.setLayout(signal_layout)
         self.signal_group.setEnabled(False)
         left_panel_layout.addWidget(self.signal_group)
+
+        # ---- Spatial Filter panel ----------------------------------------
+        self.spatial_group = QGroupBox("Spatial Filter")
+        spatial_layout = QVBoxLayout()
+        spatial_layout.setSpacing(4)
+        spatial_layout.setContentsMargins(4, 8, 4, 4)
+
+        sf_row = QHBoxLayout()
+        sf_row.addWidget(QLabel("Type:"))
+        self.spatial_combo = QComboBox()
+        self.spatial_combo.addItems(["None", "CAR", "Laplacian"])
+        self.spatial_combo.currentTextChanged.connect(self._on_spatial_filter_changed)
+        sf_row.addWidget(self.spatial_combo)
+
+        self._laplacian_cfg_btn = QPushButton("Configure...")
+        self._laplacian_cfg_btn.setVisible(False)
+        self._laplacian_cfg_btn.clicked.connect(self._open_laplacian_config)
+        sf_row.addWidget(self._laplacian_cfg_btn)
+        spatial_layout.addLayout(sf_row)
+
+        self.spatial_group.setLayout(spatial_layout)
+        self.spatial_group.setEnabled(False)
+        left_panel_layout.addWidget(self.spatial_group)
+
+        # ---- Channel Mapping panel ----------------------------------------
+        self.mapping_group = QGroupBox("Channel Mapping")
+        mapping_layout = QVBoxLayout()
+        mapping_layout.setSpacing(4)
+        mapping_layout.setContentsMargins(4, 8, 4, 4)
+
+        c3_row = QHBoxLayout()
+        c3_row.addWidget(QLabel("C3:"))
+        self.c3_combo = QComboBox()
+        self.c3_combo.currentIndexChanged.connect(self._on_c3_changed)
+        c3_row.addWidget(self.c3_combo)
+        mapping_layout.addLayout(c3_row)
+
+        c4_row = QHBoxLayout()
+        c4_row.addWidget(QLabel("C4:"))
+        self.c4_combo = QComboBox()
+        self.c4_combo.currentIndexChanged.connect(self._on_c4_changed)
+        c4_row.addWidget(self.c4_combo)
+        mapping_layout.addLayout(c4_row)
+
+        self._mapping_warning = QLabel("")
+        self._mapping_warning.setStyleSheet("color: #e04040; font-size: 11px;")
+        self._mapping_warning.setVisible(False)
+        mapping_layout.addWidget(self._mapping_warning)
+
+        self.mapping_group.setLayout(mapping_layout)
+        self.mapping_group.setEnabled(False)
+        left_panel_layout.addWidget(self.mapping_group)
 
         left_panel_layout.addStretch()
         left_panel_scroll.setWidget(left_panel)
@@ -1501,23 +1706,16 @@ class SegmentViewer(QMainWindow):
             else:
                 self.setup_stacked_mode()
             
-            # Setup channel checkboxes in dropdown
-            self.channel_dropdown_menu.clear()
-            self.channel_checkboxes = []
-            self.active_channels.clear()  # Reset active channels
-
-            for i in range(self.num_channels):
-                cb = QCheckBox(self.get_channel_name(i))
-                cb.stateChanged.connect(lambda state, ch=i: self.toggle_channel(ch, state))
-                self.channel_checkboxes.append(cb)
-
-                # Add checkbox to menu
-                action = QWidgetAction(self.channel_dropdown_menu)
-                action.setDefaultWidget(cb)
-                self.channel_dropdown_menu.addAction(action)
+            # Setup channel checkboxes in dropdown (with quality dots)
+            self._setup_channel_dropdown()
 
             # Enable channel group
             self.channel_group.setEnabled(True)
+
+            # Enable spatial filter and channel mapping panels
+            self.spatial_group.setEnabled(True)
+            self.mapping_group.setEnabled(True)
+            self._populate_mapping_combos()
 
             # Enable zoom sliders and spinboxes
             self.vertical_zoom_slider.setEnabled(True)
@@ -1685,8 +1883,9 @@ class SegmentViewer(QMainWindow):
         # Create a custom GraphicsLayoutWidget with wheel scroll signal (like mne-lsl)
         self.plot_widget = pg.GraphicsLayoutWidget()
 
-        # Add the main plot
-        self.stacked_plot_item = self.plot_widget.addPlot()
+        # Use quality-aware Y-axis
+        quality_axis = QualityAxisItem(orientation='left')
+        self.stacked_plot_item = self.plot_widget.addPlot(axisItems={'left': quality_axis})
         self.stacked_plot_item.setLabel('bottom', 'Time (s)')
         self.stacked_plot_item.setLabel('left', f'Scale: {self.yRange:.0f} uV')
         self.stacked_plot_item.showGrid(x=True, y=True, alpha=0.3)
@@ -2850,6 +3049,9 @@ class SegmentViewer(QMainWindow):
             self.file_group.setEnabled(True)
             self.stream_group.setEnabled(False)
             self.signal_group.setEnabled(False)
+            self.spatial_group.setEnabled(False)
+            self.mapping_group.setEnabled(False)
+            self._quality_timer.stop()
             # Show bottom navigation toolbar for file mode
             self.nav_widget.setVisible(True)
             # Restore play/pause for file mode
@@ -3158,6 +3360,9 @@ class SegmentViewer(QMainWindow):
             if self.streaming_active:
                 self.toggle_streaming_visualization()
 
+            # Stop quality monitoring
+            self._quality_timer.stop()
+
             # Stop the data pump before releasing the source
             self.stream_timer.stop()
 
@@ -3209,31 +3414,27 @@ class SegmentViewer(QMainWindow):
             QMessageBox.warning(self, "Warning", f"Error during disconnect:\n{str(e)}")
 
     def setup_streaming_channels(self):
-        """Setup channel checkboxes for streaming mode"""
-        self.channel_dropdown_menu.clear()
-        self.channel_checkboxes = []
-        self.active_channels.clear()
-
-        for i in range(self.num_channels):
-            cb = QCheckBox(self.get_channel_name(i))
-            cb.stateChanged.connect(lambda state, ch=i: self.toggle_channel(ch, state))
-            self.channel_checkboxes.append(cb)
-
-            # Add checkbox to menu
-            action = QWidgetAction(self.channel_dropdown_menu)
-            action.setDefaultWidget(cb)
-            self.channel_dropdown_menu.addAction(action)
+        """Setup channel checkboxes for streaming mode (with quality dots)."""
+        self._setup_channel_dropdown()
 
         # Enable channel group
         self.channel_group.setEnabled(True)
 
+        # Enable spatial filter and channel mapping panels
+        self.spatial_group.setEnabled(True)
+        self.mapping_group.setEnabled(True)
+        self._populate_mapping_combos()
+
         # Select all channels by default.
-        # Force a False→True transition so stateChanged always fires even if
+        # Force a False->True transition so stateChanged always fires even if
         # the checkbox was already True from a previous connection.
         self.select_all_checkbox.blockSignals(True)
         self.select_all_checkbox.setChecked(False)
         self.select_all_checkbox.blockSignals(False)
         self.select_all_checkbox.setChecked(True)
+
+        # Start quality monitoring timer
+        self._quality_timer.start()
 
     def start_eeg_stream(self):
         """Start LSL EEG stream"""
@@ -3621,6 +3822,10 @@ class SegmentViewer(QMainWindow):
             else:
                 filtered_data = eeg_data
 
+            # --- Apply spatial filter (CAR / Laplacian) after IIR pipeline ---
+            if self.spatial_filter is not None and self.spatial_filter.enabled:
+                filtered_data = self.spatial_filter.process(filtered_data)
+
             # Push filtered data to XDF recorder (alongside the raw stream).
             # Uses filter-only output -- no display magnitude scaling.
             if self.xdf_recorder is not None and len(self.filter_pipeline) > 0:
@@ -3701,9 +3906,13 @@ class SegmentViewer(QMainWindow):
         pass
 
     def process_signal(self, data):
-        """Apply filter pipeline to raw multi-channel chunk."""
+        """Apply filter pipeline + spatial filter to raw multi-channel chunk."""
         if len(self.filter_pipeline) > 0:
             data = self.filter_pipeline.process_chunk(data)
+
+        # Apply spatial filter (CAR / Laplacian) after IIR pipeline
+        if self.spatial_filter is not None and self.spatial_filter.enabled:
+            data = self.spatial_filter.process(data)
 
         # Apply magnitude scaling (unchanged)
         processed = data * (self.magnitude_scale / 100.0)
@@ -3866,6 +4075,188 @@ class SegmentViewer(QMainWindow):
             print(f"[Filter] Restored {len(config)} filter stage(s) from {path}")
         except Exception as e:
             print(f"[Filter] Could not load filter config: {e}")
+
+    # ------------------------------------------------------------------
+    # Channel dropdown helper (shared by file mode and streaming mode)
+    # ------------------------------------------------------------------
+
+    def _setup_channel_dropdown(self) -> None:
+        """Build channel checkboxes with quality indicator dots."""
+        self.channel_dropdown_menu.clear()
+        self.channel_checkboxes = []
+        self.active_channels.clear()
+        self._quality_dots = []
+        self._channel_quality = {i: "idle" for i in range(self.num_channels)}
+
+        for i in range(self.num_channels):
+            # Container widget: [dot] [checkbox]
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(4, 1, 4, 1)
+            row_layout.setSpacing(4)
+
+            dot = QLabel()
+            dot.setFixedSize(10, 10)
+            dot.setStyleSheet(
+                "background-color: #555555; border-radius: 5px; border: none;"
+            )
+            row_layout.addWidget(dot)
+            self._quality_dots.append(dot)
+
+            cb = QCheckBox(self.get_channel_name(i))
+            cb.stateChanged.connect(lambda state, ch=i: self.toggle_channel(ch, state))
+            row_layout.addWidget(cb)
+            row_layout.addStretch()
+            self.channel_checkboxes.append(cb)
+
+            action = QWidgetAction(self.channel_dropdown_menu)
+            action.setDefaultWidget(row_widget)
+            self.channel_dropdown_menu.addAction(action)
+
+    # ------------------------------------------------------------------
+    # Signal quality update (called every 500ms by _quality_timer)
+    # ------------------------------------------------------------------
+
+    def _update_quality(self) -> None:
+        """Recompute per-channel quality from the current stream buffer."""
+        if not self.streaming_active or self.stream_buffer is None:
+            # Not streaming -- set all dots to idle
+            for i, dot in enumerate(self._quality_dots):
+                self._channel_quality[i] = "idle"
+                dot.setStyleSheet(
+                    "background-color: #555555; border-radius: 5px; border: none;"
+                )
+            self._update_quality_axis()
+            return
+
+        # Compute quality from stream buffer (skip NaN-only columns)
+        buf = self.stream_buffer
+        # Only use the rightmost portion that has real data
+        valid_mask = ~np.isnan(buf[0, :])
+        if not np.any(valid_mask):
+            return
+        valid_start = int(np.argmax(valid_mask))
+        data_slice = buf[:, valid_start:]
+        if data_slice.shape[1] < 4:
+            return
+
+        quality = self.quality_monitor.compute(data_slice)
+        color_map = {
+            "good": "#3dba55",
+            "marginal": "#f5c842",
+            "bad": "#e04040",
+        }
+        for ch_idx in range(min(self.num_channels, len(self._quality_dots))):
+            label = quality.get(ch_idx, "idle")
+            self._channel_quality[ch_idx] = label
+            color = color_map.get(label, "#555555")
+            self._quality_dots[ch_idx].setStyleSheet(
+                f"background-color: {color}; border-radius: 5px; border: none;"
+            )
+
+        self._update_quality_axis()
+
+        # Auto-update CAR bad channel exclusion if spatial filter is CAR
+        if self.spatial_filter is not None and self.spatial_filter.filter_type == "car":
+            bad_set = {ch for ch, q in self._channel_quality.items() if q == "bad"}
+            self.spatial_filter = SpatialFilterStage.make_car(
+                n_channels=self.num_channels, bad_channels=bad_set
+            )
+
+    def _update_quality_axis(self) -> None:
+        """Push quality colours to the QualityAxisItem on the stacked plot."""
+        if (self.display_mode != 'stacked'
+                or not hasattr(self, 'stacked_plot_item')
+                or self.stacked_plot_item is None):
+            return
+        axis = self.stacked_plot_item.getAxis('left')
+        if not isinstance(axis, QualityAxisItem):
+            return
+        mapping: dict[str, str] = {}
+        for ch_idx in range(self.num_channels):
+            name = self.get_channel_name(ch_idx)
+            mapping[name] = self._channel_quality.get(ch_idx, "idle")
+        axis.set_quality_map(mapping)
+
+    # ------------------------------------------------------------------
+    # Spatial filter slots
+    # ------------------------------------------------------------------
+
+    def _on_spatial_filter_changed(self, text: str) -> None:
+        """Handle spatial filter combo box change."""
+        if text == "None":
+            self.spatial_filter = None
+            self._laplacian_cfg_btn.setVisible(False)
+        elif text == "CAR":
+            bad_set = {ch for ch, q in self._channel_quality.items() if q == "bad"}
+            self.spatial_filter = SpatialFilterStage.make_car(
+                n_channels=self.num_channels, bad_channels=bad_set
+            )
+            self._laplacian_cfg_btn.setVisible(False)
+        elif text == "Laplacian":
+            if self._laplacian_neighbors is None:
+                self._laplacian_neighbors = {
+                    k: [n for n in v if n < self.num_channels]
+                    for k, v in CYTON8_LAPLACIAN_DEFAULTS.items()
+                    if k < self.num_channels
+                }
+            self.spatial_filter = SpatialFilterStage.make_laplacian(
+                n_channels=self.num_channels,
+                neighbors=self._laplacian_neighbors,
+            )
+            self._laplacian_cfg_btn.setVisible(True)
+
+    def _open_laplacian_config(self) -> None:
+        """Open the Laplacian neighbour configuration dialog."""
+        names = [self.get_channel_name(i) for i in range(self.num_channels)]
+        dlg = LaplacianConfigDialog(
+            self.num_channels, names, self._laplacian_neighbors, parent=self
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._laplacian_neighbors = dlg.get_neighbors()
+            self.spatial_filter = SpatialFilterStage.make_laplacian(
+                n_channels=self.num_channels,
+                neighbors=self._laplacian_neighbors,
+            )
+
+    # ------------------------------------------------------------------
+    # Channel mapping slots
+    # ------------------------------------------------------------------
+
+    def _populate_mapping_combos(self) -> None:
+        """Fill C3/C4 combos with current channel names."""
+        self.c3_combo.blockSignals(True)
+        self.c4_combo.blockSignals(True)
+        self.c3_combo.clear()
+        self.c4_combo.clear()
+        for i in range(self.num_channels):
+            name = self.get_channel_name(i)
+            self.c3_combo.addItem(name, i)
+            self.c4_combo.addItem(name, i)
+        # Defaults: first two channels
+        self.c3_combo.setCurrentIndex(min(0, self.num_channels - 1))
+        self.c4_combo.setCurrentIndex(min(1, self.num_channels - 1))
+        self._c3_channel = self.c3_combo.currentData() or 0
+        self._c4_channel = self.c4_combo.currentData() or 1
+        self.c3_combo.blockSignals(False)
+        self.c4_combo.blockSignals(False)
+        self._check_mapping_conflict()
+
+    def _on_c3_changed(self, index: int) -> None:
+        self._c3_channel = self.c3_combo.currentData() or 0
+        self._check_mapping_conflict()
+
+    def _on_c4_changed(self, index: int) -> None:
+        self._c4_channel = self.c4_combo.currentData() or 0
+        self._check_mapping_conflict()
+
+    def _check_mapping_conflict(self) -> None:
+        """Show warning when C3 and C4 are mapped to the same channel."""
+        if self._c3_channel == self._c4_channel:
+            self._mapping_warning.setText("Warning: C3 and C4 mapped to the same channel")
+            self._mapping_warning.setVisible(True)
+        else:
+            self._mapping_warning.setVisible(False)
 
     def smooth_display_data(self, data):
         """Apply display smoothing to a channel's rolling buffer.
@@ -4460,6 +4851,29 @@ class SegmentViewer(QMainWindow):
                     }
                 """)
 
+            # Per-widget dark overrides -- spatial filter & channel mapping groups
+            _dark_panel_style = """
+                QGroupBox {
+                    font-weight: bold;
+                    font-size: 11px;
+                    color: #e6e6e6;
+                    border: 1px solid #3a3a3a;
+                    border-radius: 4px;
+                    margin-top: 6px;
+                    padding-top: 4px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    subcontrol-position: top left;
+                    padding: 0 4px;
+                    color: #e6e6e6;
+                }
+            """
+            for grp in (getattr(self, 'spatial_group', None),
+                        getattr(self, 'mapping_group', None)):
+                if grp is not None:
+                    grp.setStyleSheet(_dark_panel_style)
+
         else:
             # Light theme — clean white with Longhorn palette accents
             # 213C58 = dark navy, 598BBC = steel blue, F9F6EE = warm off-white
@@ -4598,6 +5012,28 @@ class SegmentViewer(QMainWindow):
                         padding: 0 4px;
                     }
                 """)
+
+            # Per-widget light overrides -- spatial filter & channel mapping groups
+            _light_panel_style = """
+                QGroupBox {
+                    font-weight: bold;
+                    font-size: 11px;
+                    color: #213C58;
+                    border: 1px solid #598BBC;
+                    border-radius: 4px;
+                    margin-top: 6px;
+                    padding-top: 4px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    subcontrol-position: top left;
+                    padding: 0 4px;
+                }
+            """
+            for grp in (getattr(self, 'spatial_group', None),
+                        getattr(self, 'mapping_group', None)):
+                if grp is not None:
+                    grp.setStyleSheet(_light_panel_style)
 
         # Regenerate channel colors for the new theme
         self.generate_channel_colors()
