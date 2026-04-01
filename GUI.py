@@ -3308,6 +3308,7 @@ class SegmentViewer(QMainWindow):
             self._refresh_filter_list_widget()
             print(f"[Filter] Default pipeline: bandpass {self.lowcut}-{self.highcut} Hz + notch {self.notch_freq} Hz @ {self.sampling_rate} Hz")
         self._load_filter_config()
+        self._load_channel_config()
 
         self.sampling_rate_spinbox.blockSignals(True)
         self.sampling_rate_spinbox.setValue(self.sampling_rate)
@@ -4077,6 +4078,71 @@ class SegmentViewer(QMainWindow):
             print(f"[Filter] Could not load filter config: {e}")
 
     # ------------------------------------------------------------------
+    # Channel config persistence (C3/C4 mapping + spatial filter)
+    # ------------------------------------------------------------------
+
+    def _save_channel_config(self) -> None:
+        """Save channel mapping and spatial filter config to session directory."""
+        if not self.xdf_save_dir:
+            return
+        path = os.path.join(self.xdf_save_dir, "channel_config.json")
+        try:
+            config: dict = {
+                "c3_index": self._c3_channel,
+                "c4_index": self._c4_channel,
+                "spatial_filter": self.spatial_combo.currentText(),
+                "laplacian_neighbors": (
+                    {str(k): v for k, v in self._laplacian_neighbors.items()}
+                    if self._laplacian_neighbors is not None
+                    else None
+                ),
+            }
+            with open(path, 'w') as f:
+                json.dump(config, f, indent=2)
+            print(f"[Channel] Saved channel config to {path}")
+        except Exception as e:
+            print(f"[Channel] Could not save channel config: {e}")
+
+    def _load_channel_config(self) -> None:
+        """Load channel mapping and spatial filter config from session directory."""
+        if not self.xdf_save_dir:
+            return
+        path = os.path.join(self.xdf_save_dir, "channel_config.json")
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path) as f:
+                config = json.load(f)
+
+            # Restore C3/C4 mapping
+            c3 = config.get("c3_index", 0)
+            c4 = config.get("c4_index", 1)
+            if c3 < self.num_channels:
+                self.c3_combo.setCurrentIndex(c3)
+                self._c3_channel = c3
+            if c4 < self.num_channels:
+                self.c4_combo.setCurrentIndex(c4)
+                self._c4_channel = c4
+
+            # Restore Laplacian neighbors (JSON keys are strings -- convert back)
+            raw_neighbors = config.get("laplacian_neighbors")
+            if raw_neighbors is not None:
+                self._laplacian_neighbors = {
+                    int(k): v for k, v in raw_neighbors.items()
+                }
+
+            # Restore spatial filter selection (triggers _on_spatial_filter_changed)
+            sf_text = config.get("spatial_filter", "None")
+            idx = self.spatial_combo.findText(sf_text)
+            if idx >= 0:
+                self.spatial_combo.setCurrentIndex(idx)
+
+            self._check_mapping_conflict()
+            print(f"[Channel] Restored channel config from {path}")
+        except Exception as e:
+            print(f"[Channel] Could not load channel config: {e}")
+
+    # ------------------------------------------------------------------
     # Channel dropdown helper (shared by file mode and streaming mode)
     # ------------------------------------------------------------------
 
@@ -4163,6 +4229,8 @@ class SegmentViewer(QMainWindow):
                 n_channels=self.num_channels, bad_channels=bad_set
             )
 
+        self._push_quality_to_task_overlay()
+
     def _update_quality_axis(self) -> None:
         """Push quality colours to the QualityAxisItem on the stacked plot."""
         if (self.display_mode != 'stacked'
@@ -4177,6 +4245,20 @@ class SegmentViewer(QMainWindow):
             name = self.get_channel_name(ch_idx)
             mapping[name] = self._channel_quality.get(ch_idx, "idle")
         axis.set_quality_map(mapping)
+
+    def _push_quality_to_task_overlay(self) -> None:
+        """Send per-channel quality data to the motor imagery task overlay."""
+        if not hasattr(self, 'web_view') or self.web_view is None:
+            return
+        quality_data = {
+            str(ch): status
+            for ch, status in self._channel_quality.items()
+        }
+        js = f"if(typeof updateChannelQuality==='function')updateChannelQuality({json.dumps(quality_data)});"
+        try:
+            self.web_view.page().runJavaScript(js)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Spatial filter slots
@@ -4205,6 +4287,7 @@ class SegmentViewer(QMainWindow):
                 neighbors=self._laplacian_neighbors,
             )
             self._laplacian_cfg_btn.setVisible(True)
+        self._save_channel_config()
 
     def _open_laplacian_config(self) -> None:
         """Open the Laplacian neighbour configuration dialog."""
@@ -4218,6 +4301,7 @@ class SegmentViewer(QMainWindow):
                 n_channels=self.num_channels,
                 neighbors=self._laplacian_neighbors,
             )
+            self._save_channel_config()
 
     # ------------------------------------------------------------------
     # Channel mapping slots
@@ -4245,10 +4329,12 @@ class SegmentViewer(QMainWindow):
     def _on_c3_changed(self, index: int) -> None:
         self._c3_channel = self.c3_combo.currentData() or 0
         self._check_mapping_conflict()
+        self._save_channel_config()
 
     def _on_c4_changed(self, index: int) -> None:
         self._c4_channel = self.c4_combo.currentData() or 0
         self._check_mapping_conflict()
+        self._save_channel_config()
 
     def _check_mapping_conflict(self) -> None:
         """Show warning when C3 and C4 are mapped to the same channel."""

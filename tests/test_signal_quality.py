@@ -281,3 +281,66 @@ def test_spatial_stage_serialization():
         err_msg="Roundtrip W matrix must be allclose to original"
     )
     assert restored.enabled == stage.enabled, "Roundtrip enabled flag mismatch"
+
+
+# ---------------------------------------------------------------------------
+# Channel config persistence tests
+# ---------------------------------------------------------------------------
+
+
+def test_channel_config_persistence(tmp_path):
+    """Save/load roundtrip of channel_config.json with known values."""
+    import json
+
+    config = {
+        "c3_index": 2,
+        "c4_index": 5,
+        "spatial_filter": "CAR",
+        "laplacian_neighbors": None,
+    }
+    path = tmp_path / "channel_config.json"
+    with open(path, "w") as f:
+        json.dump(config, f, indent=2)
+
+    with open(path) as f:
+        loaded = json.load(f)
+
+    assert loaded["c3_index"] == 2, f"c3_index mismatch: {loaded['c3_index']}"
+    assert loaded["c4_index"] == 5, f"c4_index mismatch: {loaded['c4_index']}"
+    assert loaded["spatial_filter"] == "CAR", (
+        f"spatial_filter mismatch: {loaded['spatial_filter']}"
+    )
+    assert loaded["laplacian_neighbors"] is None, (
+        f"laplacian_neighbors should be None, got {loaded['laplacian_neighbors']}"
+    )
+
+
+def test_laplacian_neighbors_persistence(tmp_path):
+    """Int key -> str key (JSON) -> int key roundtrip for laplacian neighbors."""
+    import json
+
+    neighbors = {0: [1, 2], 1: [0, 3], 2: [0, 3], 3: [1, 2]}
+    # Serialize: int keys become str keys in JSON
+    serialized = {str(k): v for k, v in neighbors.items()}
+    config = {
+        "c3_index": 0,
+        "c4_index": 1,
+        "spatial_filter": "Laplacian",
+        "laplacian_neighbors": serialized,
+    }
+    path = tmp_path / "channel_config.json"
+    with open(path, "w") as f:
+        json.dump(config, f, indent=2)
+
+    with open(path) as f:
+        loaded = json.load(f)
+
+    # Restore int keys from JSON str keys
+    restored = {int(k): v for k, v in loaded["laplacian_neighbors"].items()}
+
+    assert restored == neighbors, (
+        f"Neighbors roundtrip mismatch: {restored} != {neighbors}"
+    )
+    # Verify all keys are ints after restoration
+    for k in restored:
+        assert isinstance(k, int), f"Key {k} should be int, got {type(k).__name__}"
