@@ -106,8 +106,11 @@ def test_quality_thresholds_green_yellow_red():
     )
 
     # Combined flatline + spikes: triggers 2+ metrics -> should be 'bad'
-    combined = np.full((1, 250), 5.0, dtype=np.float64)
-    combined[0, [10, 50, 100, 150, 200]] = 10000.0
+    # Use small spikes (6.5) so overall std stays < 1.0 uV (flatline triggers)
+    # while max deviation > 6 (spike triggers with IQR=0 fallback path).
+    # 245 zeros + 5 spikes of 6.5 -> std ~ 0.92 < 1.0, max_dev = 6.5 > 6.
+    combined = np.zeros((1, 250), dtype=np.float64)
+    combined[0, [10, 50, 100, 150, 200]] = 6.5
     result_combined = monitor.compute(combined)
     assert result_combined[0] == "bad", (
         f"Flatline+spike combo expected 'bad', got '{result_combined[0]}'"
