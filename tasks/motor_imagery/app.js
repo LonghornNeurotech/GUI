@@ -23,6 +23,11 @@ let numCycles = 5;            // configurable via welcome screen
 const REST_DURATION = 4000;   // 4 s inter-trial rest / blink window
 const TASK_DURATION = 4000;   // 4 s motor imagery window
 
+// --- Mode parameter (LR or UD) ------------------------------------------------
+const params = new URLSearchParams(window.location.search);
+const MODE = (params.get("mode") || "LR").toUpperCase();
+const DIRECTIONS = MODE === "UD" ? ["UP", "DOWN"] : ["LEFT", "RIGHT"];
+
 // Each cycle contains one LEFT and one RIGHT in random order.
 // taskQueue holds the flattened sequence of task trials only.
 let taskQueue = [];
@@ -143,6 +148,7 @@ function pickSaveDir() {
 function startMindfulness() {
     document.getElementById('instruction-screen').style.display = 'none';
     document.getElementById('mindfulness-screen').style.display = 'flex';
+    sendMarker("None", "MINDFULNESS");
     playOceanWaves();
     const circle = document.getElementById('mindfulness-circle');
     const circumference = 2 * Math.PI * 100;
@@ -153,7 +159,12 @@ function startMindfulness() {
         timeLeft--;
         document.getElementById('mindfulness-timer').innerText = timeLeft;
         circle.style.strokeDashoffset = circumference - (timeLeft / 60) * circumference;
-        if (timeLeft <= 0) { clearInterval(interval); stopAudio(); startTest(); }
+        if (timeLeft <= 0) {
+            clearInterval(interval);
+            sendMarker("MINDFULNESS", "REST");
+            stopAudio();
+            startTest();
+        }
     }, 1000);
 }
 
@@ -177,7 +188,7 @@ function shuffle(arr) {
 function buildTaskQueue(cycles) {
     const queue = [];
     for (let c = 0; c < cycles; c++) {
-        const cycle = ["LEFT", "RIGHT"];
+        const cycle = [...DIRECTIONS];
         shuffle(cycle);
         queue.push(...cycle);
     }
@@ -291,6 +302,44 @@ function drawProgressiveLetter(x, y, char, isActive, color, progress) {
     ctx.restore();
 }
 
+// --- Arrow cue rendering -----------------------------------------------------
+const ARROW_COLORS = {
+    LEFT:  "#00f2ff",
+    RIGHT: "#7000ff",
+    UP:    "#00f2ff",
+    DOWN:  "#7000ff"
+};
+
+const ARROW_ROTATIONS = {
+    RIGHT: 0,
+    LEFT:  Math.PI,
+    UP:    -Math.PI / 2,
+    DOWN:  Math.PI / 2
+};
+
+function drawArrow(cx, cy, direction, color) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(ARROW_ROTATIONS[direction] || 0);
+
+    // Arrow pointing right by default: triangle tip at +80, shaft from -60
+    ctx.beginPath();
+    ctx.moveTo(80, 0);       // tip
+    ctx.lineTo(20, -40);     // upper wing
+    ctx.lineTo(20, -15);     // inner upper
+    ctx.lineTo(-60, -15);    // shaft upper
+    ctx.lineTo(-60, 15);     // shaft lower
+    ctx.lineTo(20, 15);      // inner lower
+    ctx.lineTo(20, 40);      // lower wing
+    ctx.closePath();
+
+    ctx.shadowBlur = 20;
+    ctx.shadowColor = color;
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.restore();
+}
+
 function draw() {
     ctx.fillStyle = "#050505";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -299,7 +348,7 @@ function draw() {
     const progress = Math.min((Date.now() - startTime) / currentDuration(), 1);
 
     // ---- Crosshair (always visible) ----
-    ctx.strokeStyle = "#333";
+    ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(cx - 20, cy); ctx.lineTo(cx + 20, cy);
@@ -315,9 +364,11 @@ function draw() {
         ctx.stroke();
     }
 
-    // ---- L / R visuals (always drawn; active only when state matches) ----
-    drawProgressiveLetter(cx - 300, cy, "L", state === "LEFT",  "#00f2ff", progress);
-    drawProgressiveLetter(cx + 300, cy, "R", state === "RIGHT", "#7000ff", progress);
+    // ---- Arrow cue (only during task states, not REST) ----
+    if (state !== "REST") {
+        const arrowColor = ARROW_COLORS[state] || "#ffffff";
+        drawArrow(cx, cy, state, arrowColor);
+    }
 
     // ---- Instruction text ----
     ctx.textAlign = "center";
@@ -327,10 +378,16 @@ function draw() {
         ctx.fillText("BLINK NOW  /  CLEAR MIND", cx, cy - 180);
     } else if (state === "LEFT") {
         ctx.fillStyle = "#00f2ff";
-        ctx.fillText("THINK LEFT MOVEMENT  —  DO NOT BLINK", cx, cy - 180);
+        ctx.fillText("THINK LEFT MOVEMENT -- DO NOT BLINK", cx, cy - 180);
     } else if (state === "RIGHT") {
         ctx.fillStyle = "#7000ff";
-        ctx.fillText("THINK RIGHT MOVEMENT  —  DO NOT BLINK", cx, cy - 180);
+        ctx.fillText("THINK RIGHT MOVEMENT -- DO NOT BLINK", cx, cy - 180);
+    } else if (state === "UP") {
+        ctx.fillStyle = "#00f2ff";
+        ctx.fillText("THINK UPWARD MOVEMENT -- DO NOT BLINK", cx, cy - 180);
+    } else if (state === "DOWN") {
+        ctx.fillStyle = "#7000ff";
+        ctx.fillText("THINK DOWNWARD MOVEMENT -- DO NOT BLINK", cx, cy - 180);
     }
 
     // ---- Trial counter ----
