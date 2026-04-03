@@ -26,11 +26,13 @@ const TASK_DURATION = 4000;   // 4 s motor imagery window
 // --- Mode parameter (LR or UD) ------------------------------------------------
 const params = new URLSearchParams(window.location.search);
 const MODE = (params.get("mode") || "LR").toUpperCase();
-const DIRECTIONS = MODE === "2D"
-    ? ["LEFT", "RIGHT", "UP", "DOWN"]
-    : MODE === "UD"
-        ? ["UP", "DOWN"]
-        : ["LEFT", "RIGHT"];
+const DIRECTIONS = MODE === "FREE"
+    ? []
+    : MODE === "2D"
+        ? ["LEFT", "RIGHT", "UP", "DOWN"]
+        : MODE === "UD"
+            ? ["UP", "DOWN"]
+            : ["LEFT", "RIGHT"];
 
 // Update instruction screen text for UD / 2D mode
 if (MODE === "UD") {
@@ -43,6 +45,11 @@ if (MODE === "UD") {
     if (dirEl) dirEl.innerHTML = '<span>STEP 3</span> <b>2D CURSOR:</b> Imagine movement toward the <b>highlighted target</b>. <b>Do NOT blink.</b>';
     const patEl = document.getElementById("guide-pattern");
     if (patEl) patEl.innerHTML = '<span>STEP 4</span> Pattern: <b>REST \u2192 L / R / U / D target \u2192 REST \u2192 \u2026</b> (4 per cycle)';
+} else if (MODE === "FREE") {
+    const dirEl = document.getElementById("guide-directions");
+    if (dirEl) dirEl.innerHTML = '<span>STEP 3</span> <b>FREE CURSOR:</b> Control the cursor freely with your imagination. No cues will appear.';
+    const patEl = document.getElementById("guide-pattern");
+    if (patEl) patEl.innerHTML = '<span>STEP 4</span> Continuous free control -- move the cursor wherever you wish.';
 }
 
 // Each cycle contains one LEFT and one RIGHT in random order.
@@ -69,6 +76,16 @@ function sendMarker(stopStage, startStage) {
     if (pyBridge) {
         pyBridge.send_marker(marker);
     }
+}
+
+// --- Cursor position marker (FREE mode) --------------------------------------
+function sendCursorPosition() {
+    const marker = JSON.stringify({
+        type: "cursor_pos",
+        x: Math.round(cursorX * 10000) / 10000,
+        y: Math.round(cursorY * 10000) / 10000
+    });
+    if (pyBridge) { pyBridge.send_marker(marker); }
 }
 
 // --- Ocean Wave Audio --------------------------------------------------------
@@ -163,6 +180,7 @@ function pickSaveDir() {
 }
 
 function startMindfulness() {
+    if (MODE === "FREE") { startFree(); return; }
     document.getElementById('instruction-screen').style.display = 'none';
     document.getElementById('mindfulness-screen').style.display = 'flex';
     sendMarker("None", "MINDFULNESS");
@@ -498,6 +516,71 @@ function draw() {
     ctx.textAlign = "center";
     const currentCycle = Math.floor(rounds / DIRECTIONS.length) + 1;
     ctx.fillText(`CYCLE ${currentCycle} / ${numCycles}  —  TRIAL ${rounds + 1} / ${totalTrials}`, cx, canvas.height - 50);
+}
+
+// --- FREE mode ---------------------------------------------------------------
+function startFree() {
+    document.getElementById('instruction-screen').style.display = 'none';
+    canvas.style.display = 'block';
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    const patientId = document.getElementById('subName').value || "UNKNOWN";
+    const saveDir = document.getElementById('saveDir').value || "";
+    if (pyBridge) { pyBridge.start_streams(patientId, saveDir); }
+
+    cursorX = 0.5;
+    cursorY = 0.5;
+
+    // Escape key ends free cursor session
+    document.addEventListener('keydown', function onEsc(e) {
+        if (e.key === 'Escape') {
+            document.removeEventListener('keydown', onEsc);
+            sendMarker("FREE_CURSOR", "None");
+            if (pyBridge) { pyBridge.stop_streams(); }
+            endSession();
+        }
+    });
+
+    // Small delay for XDF recorder initialization
+    setTimeout(() => {
+        sendMarker("None", "FREE_CURSOR");
+        document.fonts.ready.then(() => {
+            requestAnimationFrame(updateFree);
+        });
+    }, 200);
+}
+
+function updateFree() {
+    if (canvas.style.display === 'none') return;
+    updateCursorPosition();
+    sendCursorPosition();
+    drawFree();
+    requestAnimationFrame(updateFree);
+}
+
+function drawFree() {
+    ctx.fillStyle = "#050505";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const cx = canvas.width / 2;
+    const cy = canvas.height / 2;
+
+    // Crosshair at center
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx - 20, cy); ctx.lineTo(cx + 20, cy);
+    ctx.moveTo(cx, cy - 20); ctx.lineTo(cx, cy + 20);
+    ctx.stroke();
+
+    // Cursor dot
+    drawCursor();
+
+    // Minimal status text
+    ctx.textAlign = "center";
+    ctx.font = "700 22px 'Space Grotesk'";
+    ctx.fillStyle = "#333";
+    ctx.fillText("FREE CURSOR MODE", cx, canvas.height - 50);
 }
 
 // --- Session end -------------------------------------------------------------
