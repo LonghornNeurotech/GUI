@@ -109,7 +109,7 @@ from dsp.quality import SignalQualityMonitor
 from dsp.band_power import BandPowerExtractor, RestBaselineTracker, ControlSignals
 from dsp.transfer_function import apply_transfer_function
 from dsp.classifier import (
-    extract_epochs, BCITrainer, CSPFilter, LDAClassifier, save_weights, load_weights,
+    extract_epochs, detect_axis, BCITrainer, CSPFilter, LDAClassifier, save_weights, load_weights,
 )
 
 # Auto-updater
@@ -919,6 +919,9 @@ class SegmentViewer(QMainWindow):
         # CSP+LDA training state
         self._csp_filter: CSPFilter | None = None
         self._lda_classifier: LDAClassifier | None = None
+        self._csp_filter_ud: CSPFilter | None = None
+        self._lda_classifier_ud: LDAClassifier | None = None
+        self._detected_axis: str | None = None
         self._train_worker: TrainWorker | None = None
         self._loaded_epochs: dict[str, list] | None = None
         self._xdf_dir: str | None = None
@@ -1421,7 +1424,7 @@ class SegmentViewer(QMainWindow):
         cs_layout.addWidget(self.rebaseline_btn)
 
         r_row = QHBoxLayout()
-        r_row.addWidget(QLabel("R Factor:"))
+        r_row.addWidget(QLabel("R (LR):"))
         self.r_factor_spinbox = QDoubleSpinBox()
         self.r_factor_spinbox.setRange(0.1, 10.0)
         self.r_factor_spinbox.setValue(1.0)
@@ -1429,6 +1432,16 @@ class SegmentViewer(QMainWindow):
         self.r_factor_spinbox.setDecimals(2)
         r_row.addWidget(self.r_factor_spinbox)
         cs_layout.addLayout(r_row)
+
+        r_ud_row = QHBoxLayout()
+        r_ud_row.addWidget(QLabel("R (UD):"))
+        self.r_factor_ud_spinbox = QDoubleSpinBox()
+        self.r_factor_ud_spinbox.setRange(0.1, 10.0)
+        self.r_factor_ud_spinbox.setValue(1.0)
+        self.r_factor_ud_spinbox.setSingleStep(0.1)
+        self.r_factor_ud_spinbox.setDecimals(2)
+        r_ud_row.addWidget(self.r_factor_ud_spinbox)
+        cs_layout.addLayout(r_ud_row)
 
         # --- CSP+LDA Training Sub-section ---
         csp_sep = QFrame()
@@ -1859,25 +1872,35 @@ class SegmentViewer(QMainWindow):
                 # _load_xdf returns (time_sec, label) but extract_epochs wants (label, time_sec)
                 swapped_markers = [(lbl, ts) for ts, lbl in self.markers]
                 try:
+                    axis = detect_axis(swapped_markers)
+                    self._detected_axis = axis
+                    if axis == "LR":
+                        classes = ("LEFT", "RIGHT")
+                    else:
+                        classes = ("UP", "DOWN")
                     self._loaded_epochs = extract_epochs(
-                        self.raw_data, swapped_markers, srate
+                        self.raw_data, swapped_markers, srate, classes=classes
                     )
-                    n_left = len(self._loaded_epochs.get("LEFT", []))
-                    n_right = len(self._loaded_epochs.get("RIGHT", []))
+                    c1_label, c2_label = classes
+                    n_c1 = len(self._loaded_epochs.get(c1_label, []))
+                    n_c2 = len(self._loaded_epochs.get(c2_label, []))
                     self._trial_count_label.setText(
-                        f"LEFT: {n_left} | RIGHT: {n_right}"
+                        f"{c1_label}: {n_c1} | {c2_label}: {n_c2}"
                     )
-                    if n_left >= 40 and n_right >= 40:
+                    if n_c1 >= 40 and n_c2 >= 40:
                         self._train_btn.setEnabled(True)
-                        self._train_btn.setToolTip("Train CSP+LDA from loaded trials")
+                        self._train_btn.setToolTip(
+                            f"Train CSP+LDA ({axis}) from loaded trials"
+                        )
                     else:
                         self._train_btn.setEnabled(False)
                         self._train_btn.setToolTip(
-                            f"Need 40+ trials per class (have LEFT={n_left}, RIGHT={n_right})"
+                            f"Need 40+ trials per class (have {c1_label}={n_c1}, {c2_label}={n_c2})"
                         )
                 except Exception:
                     self._loaded_epochs = None
-                    self._trial_count_label.setText("LEFT: 0 | RIGHT: 0")
+                    self._detected_axis = None
+                    self._trial_count_label.setText("No axis markers found")
                     self._train_btn.setEnabled(False)
             else:
                 QMessageBox.warning(self, "Error", "Unsupported file type. Please select a .gdf, .pkl, or .xdf file.")
@@ -4536,9 +4559,10 @@ class SegmentViewer(QMainWindow):
         cs = self._last_control_signals
         if cs is None:
             return
-        r = self.r_factor_spinbox.value()
-        tf_lr = apply_transfer_function(cs.lr, r)
-        tf_ud = apply_transfer_function(cs.ud, r)
+        r_lr = self.r_factor_spinbox.value()
+        r_ud = self.r_factor_ud_spinbox.value()
+        tf_lr = apply_transfer_function(cs.lr, r_lr)
+        tf_ud = apply_transfer_function(cs.ud, r_ud)
         self.lr_readout.setText(f"{tf_lr:+.3f}")
         self.ud_readout.setText(f"{tf_ud:+.3f}")
         payload = {
@@ -4602,10 +4626,17 @@ class SegmentViewer(QMainWindow):
 
     def _on_train_finished(self, csp: object, lda: object) -> None:
         """Handle successful training completion."""
-        self._csp_filter = csp
-        self._lda_classifier = lda
+        axis = self._detected_axis or "LR"
+        if axis == "UD":
+            self._csp_filter_ud = csp
+            self._lda_classifier_ud = lda
+        else:
+            self._csp_filter = csp
+            self._lda_classifier = lda
         self._save_weights_btn.setEnabled(True)
-        self._train_status.setText("Training complete -- ready for online classification")
+        self._train_status.setText(
+            f"Training complete ({axis}) -- ready for online classification"
+        )
         self._train_progress.setVisible(False)
         self._train_btn.setEnabled(True)
 
@@ -4615,9 +4646,16 @@ class SegmentViewer(QMainWindow):
 
         # Auto-save weights to XDF directory
         if self._xdf_dir:
-            default_path = os.path.join(self._xdf_dir, "csp_lda_weights.json")
+            if axis == "UD":
+                fname = "csp_lda_weights_ud.json"
+            else:
+                fname = "csp_lda_weights.json"
+            default_path = os.path.join(self._xdf_dir, fname)
             try:
-                save_weights(default_path, self._csp_filter, self._lda_classifier)
+                if axis == "UD":
+                    save_weights(default_path, self._csp_filter_ud, self._lda_classifier_ud, axis="UD")
+                else:
+                    save_weights(default_path, self._csp_filter, self._lda_classifier, axis="LR")
                 self._weights_path_label.setText(default_path)
             except Exception as e:
                 self._train_status.setText(f"Trained but auto-save failed: {e}")
@@ -4630,19 +4668,27 @@ class SegmentViewer(QMainWindow):
         self._train_status.setText("")
 
     def _on_load_weights(self) -> None:
-        """Load CSP+LDA weights from a JSON file."""
+        """Load CSP+LDA weights from a JSON file.
+
+        Auto-detects axis from saved JSON ('axis' field). Routes to LR or UD
+        model slots accordingly. Files without an axis field default to LR.
+        """
         path, _ = QFileDialog.getOpenFileName(
             self, "Load CSP+LDA Weights", "", "JSON Files (*.json)"
         )
         if not path:
             return
         try:
-            csp, lda = load_weights(path)
-            self._csp_filter = csp
-            self._lda_classifier = lda
+            csp, lda, axis = load_weights(path)
+            if axis == "UD":
+                self._csp_filter_ud = csp
+                self._lda_classifier_ud = lda
+            else:
+                self._csp_filter = csp
+                self._lda_classifier = lda
             self._save_weights_btn.setEnabled(True)
             self._weights_path_label.setText(path)
-            self._train_status.setText("Weights loaded successfully")
+            self._train_status.setText(f"Weights loaded ({axis})")
 
             # Show feedback bar if currently streaming
             if self.streaming_active:
