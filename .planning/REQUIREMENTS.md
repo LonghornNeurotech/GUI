@@ -57,11 +57,11 @@
 ### Motor Imagery Tasks — Offline 1D
 
 - [x] **TASK-01**: 1D Left/Right offline task with minimalist lab-style UI (native PyQt6 or clean web)
-- [ ] **TASK-02**: Task timing: 60s mindfulness period → repeating 4s cue / 4s rest cycles
+- [x] **TASK-02**: Task timing: 60s mindfulness period → repeating 4s cue / 4s rest cycles
 - [ ] **TASK-03**: LEFT and RIGHT cues presented in random or alternating order
-- [ ] **TASK-04**: Blink prompts shown during REST periods only
-- [ ] **TASK-05**: Central crosshair fixation point always visible during task
-- [ ] **TASK-06**: All state transitions emit LSL markers recorded to XDF
+- [x] **TASK-04**: Blink prompts shown during REST periods only
+- [x] **TASK-05**: Central crosshair fixation point always visible during task
+- [x] **TASK-06**: All state transitions emit LSL markers recorded to XDF
 - [x] **TASK-07**: 1D Up/Down offline task with same timing structure
 - [ ] **TASK-08**: Configurable number of cycles per run
 
@@ -153,11 +153,11 @@
 | XFER-03 | Phase 4 | Pending |
 | XFER-04 | Phase 4 | Complete |
 | TASK-01 | Phase 4 | Complete |
-| TASK-02 | Phase 4 | Pending |
+| TASK-02 | Phase 4 | Complete |
 | TASK-03 | Phase 4 | Pending |
-| TASK-04 | Phase 4 | Pending |
-| TASK-05 | Phase 4 | Pending |
-| TASK-06 | Phase 4 | Pending |
+| TASK-04 | Phase 4 | Complete |
+| TASK-05 | Phase 4 | Complete |
+| TASK-06 | Phase 4 | Complete |
 | TASK-07 | Phase 4 | Complete |
 | TASK-08 | Phase 4 | Pending |
 | SPAT-03 | Phase 5 | Pending |
