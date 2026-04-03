@@ -76,7 +76,7 @@ Plans:
 Plans:
 - [x] 03-01-PLAN.md — TDD: BandPowerExtractor + RestBaselineTracker + ControlSignals in dsp/band_power.py
 - [x] 03-02-PLAN.md — Wire band power + control signals into GUI.py with Control Signals UI
-- [ ] 03-03-PLAN.md — Push control signals to TaskWebBridge + end-to-end integration verification
+- [x] 03-03-PLAN.md — Push control signals to TaskWebBridge + end-to-end integration verification
 
 ### Phase 4: Transfer Function and 1D Motor Imagery Tasks
 **Goal**: Researchers can run complete 1D Left/Right and 1D Up/Down offline motor imagery sessions in a native PyQt6 task window, with a transfer function shaping the decoded control signal using subject-specific parameters
