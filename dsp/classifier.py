@@ -85,6 +85,49 @@ def extract_epochs(
     return epochs
 
 
+def detect_axis(markers: list[tuple[str, float]]) -> str:
+    """Detect whether markers belong to the LR or UD axis.
+
+    Scans parsed marker labels for LEFT/RIGHT vs UP/DOWN presence.
+
+    Parameters
+    ----------
+    markers : list[tuple[str, float]]
+        List of (label, time_sec) tuples. Labels may be raw strings or
+        JSON like '{"start":"LEFT"}'.
+
+    Returns
+    -------
+    str
+        "LR" if LEFT/RIGHT markers found, "UD" if UP/DOWN markers found.
+
+    Raises
+    ------
+    ValueError
+        If both axes found, or neither axis found.
+    """
+    lr_labels = {"LEFT", "RIGHT"}
+    ud_labels = {"UP", "DOWN"}
+    has_lr = False
+    has_ud = False
+
+    for label, _time in markers:
+        parsed = _parse_marker_label(label)
+        if parsed in lr_labels:
+            has_lr = True
+        if parsed in ud_labels:
+            has_ud = True
+
+    if has_lr and has_ud:
+        raise ValueError(
+            "Markers contain both LR and UD labels -- cannot determine axis"
+        )
+    if not has_lr and not has_ud:
+        raise ValueError("No recognized axis labels (LEFT/RIGHT or UP/DOWN) found")
+
+    return "LR" if has_lr else "UD"
+
+
 # ---------------------------------------------------------------------------
 # CSP Filter
 # ---------------------------------------------------------------------------
@@ -316,7 +359,7 @@ class BCITrainer:
 
 
 def save_weights(
-    path: str, csp: CSPFilter, lda: LDAClassifier
+    path: str, csp: CSPFilter, lda: LDAClassifier, axis: str = "LR"
 ) -> None:
     """Save CSP and LDA weights to JSON file.
 
@@ -328,12 +371,15 @@ def save_weights(
         Fitted CSP filter.
     lda : LDAClassifier
         Fitted LDA classifier.
+    axis : str
+        Axis identifier stored in the file ("LR" or "UD"). Default "LR".
     """
     if csp.W_ is None:
         raise RuntimeError("CSPFilter has not been fitted yet")
 
     data = {
         "version": 1,
+        "axis": axis,
         "n_components": csp.n_components,
         "csp_w": csp.W_.tolist(),
         "lda_coef": lda.coef_.tolist(),
@@ -344,7 +390,7 @@ def save_weights(
         json.dump(data, f, indent=2)
 
 
-def load_weights(path: str) -> tuple[CSPFilter, LDAClassifier]:
+def load_weights(path: str) -> tuple[CSPFilter, LDAClassifier, str]:
     """Load CSP and LDA weights from JSON file.
 
     Parameters
@@ -354,8 +400,10 @@ def load_weights(path: str) -> tuple[CSPFilter, LDAClassifier]:
 
     Returns
     -------
-    tuple[CSPFilter, LDAClassifier]
-        Reconstructed CSP filter and LDA classifier.
+    tuple[CSPFilter, LDAClassifier, str]
+        Reconstructed CSP filter, LDA classifier, and axis string.
+        If the file has no "axis" key, defaults to "LR" for backward
+        compatibility.
 
     Raises
     ------
@@ -379,4 +427,6 @@ def load_weights(path: str) -> tuple[CSPFilter, LDAClassifier]:
     lda._lda.intercept_ = np.array(data["lda_intercept"])
     lda._lda.classes_ = np.array(data["lda_classes"])
 
-    return csp, lda
+    axis = data.get("axis", "LR")
+
+    return csp, lda, axis

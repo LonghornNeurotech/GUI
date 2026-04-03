@@ -14,6 +14,7 @@ from dsp.classifier import (
     BCITrainer,
     CSPFilter,
     LDAClassifier,
+    detect_axis,
     extract_epochs,
     load_weights,
     save_weights,
@@ -189,7 +190,8 @@ def test_save_load_roundtrip(tmp_path: object) -> None:
     path = str(tmp_path / "weights.json")  # type: ignore[operator]
     save_weights(path, csp, lda)
 
-    csp2, lda2 = load_weights(path)
+    csp2, lda2, axis = load_weights(path)
+    assert axis == "LR"  # default axis
     assert np.allclose(csp.W_, csp2.W_)
     assert np.allclose(lda.coef_, lda2.coef_)
     assert np.allclose(lda.intercept_, lda2.intercept_)
@@ -330,7 +332,7 @@ class TestFullPipelineIntegration:
         # Save and reload
         weight_path = str(tmp_path / "test_weights.json")  # type: ignore[operator]
         save_weights(weight_path, csp, lda)
-        csp_loaded, lda_loaded = load_weights(weight_path)
+        csp_loaded, lda_loaded, _axis = load_weights(weight_path)
 
         loaded_feat = csp_loaded.transform(test_chunk)
         loaded_certainty = lda_loaded.predict_certainty(loaded_feat)
@@ -395,7 +397,7 @@ class TestFullPipelineIntegration:
 
         weight_path = str(tmp_path / "multi_weights.json")  # type: ignore[operator]
         save_weights(weight_path, csp, lda)
-        csp_loaded, lda_loaded = load_weights(weight_path)
+        csp_loaded, lda_loaded, _axis = load_weights(weight_path)
 
         rng = np.random.default_rng(123)
         for _ in range(10):
@@ -405,3 +407,171 @@ class TestFullPipelineIntegration:
             assert np.isclose(orig_cert, load_cert), (
                 f"Mismatch: original={orig_cert}, loaded={load_cert}"
             )
+
+
+# ---------------------------------------------------------------------------
+# detect_axis
+# ---------------------------------------------------------------------------
+
+
+class TestDetectAxis:
+    """Tests for detect_axis helper function."""
+
+    def test_lr_markers(self) -> None:
+        """Markers containing LEFT/RIGHT labels return 'LR'."""
+        markers = [("LEFT", 1.0), ("RIGHT", 5.0), ("LEFT", 10.0)]
+        assert detect_axis(markers) == "LR"
+
+    def test_ud_markers(self) -> None:
+        """Markers containing UP/DOWN labels return 'UD'."""
+        markers = [("UP", 1.0), ("DOWN", 5.0), ("UP", 10.0)]
+        assert detect_axis(markers) == "UD"
+
+    def test_json_markers_lr(self) -> None:
+        """JSON-formatted LEFT/RIGHT markers return 'LR'."""
+        markers = [('{"start":"LEFT"}', 1.0), ('{"start":"RIGHT"}', 5.0)]
+        assert detect_axis(markers) == "LR"
+
+    def test_json_markers_ud(self) -> None:
+        """JSON-formatted UP/DOWN markers return 'UD'."""
+        markers = [('{"start":"UP"}', 1.0), ('{"start":"DOWN"}', 5.0)]
+        assert detect_axis(markers) == "UD"
+
+    def test_mixed_raises(self) -> None:
+        """Markers with both LR and UD labels raise ValueError."""
+        markers = [("LEFT", 1.0), ("UP", 5.0)]
+        with pytest.raises(ValueError, match="both"):
+            detect_axis(markers)
+
+    def test_no_recognized_raises(self) -> None:
+        """Markers with no recognized labels raise ValueError."""
+        markers = [("REST", 1.0), ("BLINK", 5.0)]
+        with pytest.raises(ValueError, match="No recognized"):
+            detect_axis(markers)
+
+    def test_empty_markers_raises(self) -> None:
+        """Empty marker list raises ValueError."""
+        with pytest.raises(ValueError, match="No recognized"):
+            detect_axis([])
+
+
+# ---------------------------------------------------------------------------
+# UD epoch extraction and training
+# ---------------------------------------------------------------------------
+
+
+def _generate_synthetic_ud_session(
+    n_channels: int = 8,
+    srate: float = 250.0,
+    n_trials_per_class: int = 50,
+    trial_duration: float = 4.0,
+    inter_trial_gap: float = 2.0,
+) -> tuple[np.ndarray, list[tuple[str, float]]]:
+    """Generate synthetic EEG session with UP/DOWN class separation.
+
+    Class 1 (UP): elevated variance on channels 0-1 (multiply by 5).
+    Class 2 (DOWN): elevated variance on channels 6-7 (multiply by 5).
+    """
+    rng = np.random.default_rng(77)
+    total_trials = n_trials_per_class * 2
+    trial_samples = int(trial_duration * srate)
+    gap_samples = int(inter_trial_gap * srate)
+    segment_samples = trial_samples + gap_samples
+    total_samples = total_trials * segment_samples + int(srate)
+
+    eeg = rng.standard_normal((n_channels, total_samples)) * 0.5
+    markers: list[tuple[str, float]] = []
+
+    classes = ["UP", "DOWN"]
+    for i in range(total_trials):
+        cls = classes[i % 2]
+        start_sample = i * segment_samples + int(srate * 0.5)
+        end_sample = start_sample + trial_samples
+        if end_sample > total_samples:
+            break
+        if cls == "UP":
+            eeg[0:2, start_sample:end_sample] *= 5.0
+        else:
+            eeg[6:8, start_sample:end_sample] *= 5.0
+        markers.append((cls, start_sample / srate))
+
+    return eeg, markers
+
+
+def test_extract_epochs_ud() -> None:
+    """extract_epochs with classes=('UP', 'DOWN') produces correct epoch dict."""
+    eeg, markers = _generate_synthetic_ud_session()
+    epochs = extract_epochs(
+        eeg, markers, srate=250.0, window_sec=4.0, classes=("UP", "DOWN")
+    )
+    assert "UP" in epochs
+    assert "DOWN" in epochs
+    assert len(epochs["UP"]) == 50
+    assert len(epochs["DOWN"]) == 50
+    assert epochs["UP"][0].shape == (8, 1000)
+
+
+def test_bci_trainer_ud_epochs() -> None:
+    """BCITrainer.fit succeeds with UP/DOWN epochs."""
+    eeg, markers = _generate_synthetic_ud_session()
+    epochs = extract_epochs(
+        eeg, markers, srate=250.0, window_sec=4.0, classes=("UP", "DOWN")
+    )
+    trainer = BCITrainer(min_trials_per_class=40, n_components=4)
+    csp, lda = trainer.fit(epochs)
+    assert csp.fitted
+    # Verify inference works on a random chunk
+    test_chunk = np.random.default_rng(88).standard_normal((8, 1000))
+    cert = lda.predict_certainty(csp.transform(test_chunk))
+    assert -1.0 <= cert <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# save_weights / load_weights with axis field
+# ---------------------------------------------------------------------------
+
+
+def test_save_load_with_axis_field(tmp_path: object) -> None:
+    """save_weights with axis param stores axis; load_weights returns it."""
+    class1, class2 = _make_separable_trials()
+    csp = CSPFilter(n_components=4)
+    csp.fit(class1, class2)
+    features = [csp.transform(t) for t in class1 + class2]
+    labels = np.array([0] * len(class1) + [1] * len(class2))
+    lda = LDAClassifier()
+    lda.fit(np.array(features), labels)
+
+    path = str(tmp_path / "weights_ud.json")  # type: ignore[operator]
+    save_weights(path, csp, lda, axis="UD")
+
+    csp2, lda2, axis = load_weights(path)
+    assert axis == "UD"
+    assert np.allclose(csp.W_, csp2.W_)
+
+
+def test_load_weights_backward_compat(tmp_path: object) -> None:
+    """load_weights on file without axis field defaults to 'LR'."""
+    class1, class2 = _make_separable_trials()
+    csp = CSPFilter(n_components=4)
+    csp.fit(class1, class2)
+    features = [csp.transform(t) for t in class1 + class2]
+    labels = np.array([0] * len(class1) + [1] * len(class2))
+    lda = LDAClassifier()
+    lda.fit(np.array(features), labels)
+
+    # Save without axis (old format)
+    path = str(tmp_path / "weights_old.json")  # type: ignore[operator]
+    import json as _json
+    data = {
+        "version": 1,
+        "n_components": csp.n_components,
+        "csp_w": csp.W_.tolist(),
+        "lda_coef": lda.coef_.tolist(),
+        "lda_intercept": lda.intercept_.tolist(),
+        "lda_classes": lda.classes_.tolist(),
+    }
+    with open(path, "w") as f:
+        _json.dump(data, f)
+
+    csp2, lda2, axis = load_weights(path)
+    assert axis == "LR"

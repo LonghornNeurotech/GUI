@@ -5,4 +5,4 @@
 #   quality          -- SignalQualityMonitor
 #   band_power       -- BandPowerExtractor, RestBaselineTracker, ControlSignals
 #   transfer_function -- apply_transfer_function
-#   classifier       -- CSPFilter, LDAClassifier, BCITrainer, extract_epochs, save_weights, load_weights
+#   classifier       -- CSPFilter, LDAClassifier, BCITrainer, extract_epochs, detect_axis, save_weights, load_weights
