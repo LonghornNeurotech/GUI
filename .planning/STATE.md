@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 05-04-PLAN.md
-last_updated: "2026-04-03T02:31:39.402Z"
+status: executing
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-04-03T04:14:26.461Z"
 last_activity: 2026-04-03
 progress:
   total_phases: 8
   completed_phases: 5
-  total_plans: 21
-  completed_plans: 19
+  total_plans: 24
+  completed_plans: 20
   percent: 12
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-30)
 
 **Core value:** Researchers can run a complete motor imagery BCI experiment -- from signal conditioning through real-time cursor decoding -- entirely within this GUI.
-**Current focus:** Phase 05 — csp-training-lda-classifier-and-feedback-bar
+**Current focus:** Phase 06 — 1d-up-down-decoder-and-2d-cursor-task
 
 ## Current Position
 
-Phase: 05 (csp-training-lda-classifier-and-feedback-bar) — EXECUTING
-Plan: 4 of 4
-Status: Phase complete — ready for verification
+Phase: 06 (1d-up-down-decoder-and-2d-cursor-task) — EXECUTING
+Plan: 2 of 3
+Status: Ready to execute
 Last activity: 2026-04-03
 
 Progress: [██░░░░░░░░] 12%
@@ -64,6 +64,7 @@ Progress: [██░░░░░░░░] 12%
 | Phase 05 P02 | 2min | 2 tasks | 1 files |
 | Phase 05 P03 | 3min | 2 tasks | 1 files |
 | Phase 05 P04 | 2min | 2 tasks | 1 files |
+| Phase 06 P02 | 2min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -91,6 +92,7 @@ Progress: [██░░░░░░░░] 12%
 - [Phase 05]: Auto-save weights to XDF directory on training completion
 - [Phase 05]: FeedbackBar placed after viz_tabs, fixed 30px, CSP+LDA inference inline in update_stream_data
 - [Phase 05]: Synthetic EEG generator uses channel-specific 5x variance scaling for clean CSP class separation in integration tests
+- [Phase 06]: Highlighted target square IS the cue in 2D mode -- no arrows; cursor clamped to [0.05,0.95]; cycle counter uses DIRECTIONS.length
 
 ### Pending Todos
 
@@ -104,6 +106,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-03T02:31:39.388Z
-Stopped at: Completed 05-04-PLAN.md
+Last session: 2026-04-03T04:14:26.412Z
+Stopped at: Completed 06-02-PLAN.md
 Resume file: None

@@ -81,8 +81,8 @@
 ### 2D Cursor Task
 
 - [ ] **CUR2-01**: 2D cursor task combining LR and UD decoded control signals
-- [ ] **CUR2-02**: Cursor position updated in real-time from transfer function outputs
-- [ ] **CUR2-03**: 4 targets (top, bottom, left, right) presented as cues
+- [x] **CUR2-02**: Cursor position updated in real-time from transfer function outputs
+- [x] **CUR2-03**: 4 targets (top, bottom, left, right) presented as cues
 - [ ] **CUR2-04**: Progression gate: requires 1D LR and 1D UD training completed first
 
 ### Asynchronous Free-Cursor
@@ -167,8 +167,8 @@
 | FDBK-02 | Phase 5 | Complete |
 | FDBK-03 | Phase 5 | Complete |
 | CUR2-01 | Phase 6 | Pending |
-| CUR2-02 | Phase 6 | Pending |
-| CUR2-03 | Phase 6 | Pending |
+| CUR2-02 | Phase 6 | Complete |
+| CUR2-03 | Phase 6 | Complete |
 | CUR2-04 | Phase 6 | Pending |
 | ASYN-01 | Phase 7 | Pending |
 | ASYN-02 | Phase 7 | Pending |
