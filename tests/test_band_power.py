@@ -239,3 +239,42 @@ def test_log_transform_applied():
     expected_log = np.log(10.0 + 1e-12)
     np.testing.assert_allclose(stored_c3, expected_log, atol=1e-10,
                                err_msg=f"Stored {stored_c3}, expected log(10)={expected_log}")
+
+
+# ---------------------------------------------------------------------------
+# End-to-end integration test
+# ---------------------------------------------------------------------------
+
+
+def test_full_pipeline_integration():
+    """End-to-end: BandPowerExtractor -> RestBaselineTracker -> ControlSignals."""
+    extractor = BandPowerExtractor(fs=250.0)
+    tracker = RestBaselineTracker(max_samples=470, min_baseline=10)
+
+    # Generate 256 samples of 10 Hz sine (mu band) for C3
+    # and 256 samples of 10 Hz sine with 2x amplitude for C4
+    t = np.arange(256) / 250.0
+    c3_signal = np.sin(2 * np.pi * 10 * t)
+    c4_signal = 2.0 * np.sin(2 * np.pi * 10 * t)
+
+    # Feed in chunks of 32 to simulate streaming
+    tracker.set_state("REST")
+    result = None
+    for i in range(0, 256, 32):
+        result = extractor.update(c3_signal[i:i + 32], c4_signal[i:i + 32])
+
+    # After 256 samples, should have mu power
+    assert result is not None, "Should have mu power after 256 samples"
+    mu_c3, mu_c4 = result
+    assert mu_c4 > mu_c3, "C4 (2x amplitude) should have higher mu power than C3"
+
+    # Accumulate REST baseline (need 10+ samples)
+    for _ in range(15):
+        tracker.accumulate(mu_c3, mu_c4)
+
+    cs = tracker.compute_control_signals(mu_c3, mu_c4)
+    assert cs.baseline_ready is True, "Should be ready after 15 REST samples"
+    assert isinstance(cs.lr, float)
+    assert isinstance(cs.ud, float)
+    assert cs.mu_c3 == mu_c3
+    assert cs.mu_c4 == mu_c4
