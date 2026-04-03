@@ -28,6 +28,14 @@ const params = new URLSearchParams(window.location.search);
 const MODE = (params.get("mode") || "LR").toUpperCase();
 const DIRECTIONS = MODE === "UD" ? ["UP", "DOWN"] : ["LEFT", "RIGHT"];
 
+// Update instruction screen text for UD mode
+if (MODE === "UD") {
+    const dirEl = document.getElementById("guide-directions");
+    if (dirEl) dirEl.innerHTML = '<span>STEP 3</span> <b>UP / DOWN:</b> Imagine the movement as the arrow appears. <b>Do NOT blink.</b>';
+    const patEl = document.getElementById("guide-pattern");
+    if (patEl) patEl.innerHTML = '<span>STEP 4</span> Pattern: <b>REST \u2192 UP or DOWN \u2192 REST \u2192 UP or DOWN \u2192 \u2026</b>';
+}
+
 // Each cycle contains one LEFT and one RIGHT in random order.
 // taskQueue holds the flattened sequence of task trials only.
 let taskQueue = [];
