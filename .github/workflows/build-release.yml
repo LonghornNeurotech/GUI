@@ -105,53 +105,14 @@ jobs:
             --name "$APP_NAME" \
             GUI.py
 
-      - name: Install Apple Certificate
-        if: runner.os == 'macOS'
-        env:
-          CERT_BASE64: ${{ secrets.MAC_CERTS_BASE64 }}
-          CERT_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
-        run: |
-          CERT_PATH=$RUNNER_TEMP/build_certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          echo -n "$CERT_BASE64" | base64 --decode -o $CERT_PATH
-          security create-keychain -p "actions" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p "actions" $KEYCHAIN_PATH
-          security import $CERT_PATH -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
+      # Notarization skipped -- no Apple Developer ID certificate.
+      # macOS users: right-click > Open to bypass Gatekeeper warning.
+      # To re-enable: set MAC_CERTS_BASE64, MAC_CERTS_PASSWORD, APPLE_ID,
+      # APPLE_PASSWORD, APPLE_TEAM_ID secrets and uncomment signing steps.
 
-      - name: Sign the macOS App
+      - name: Zip macOS App
         if: runner.os == 'macOS'
         run: |
-          codesign --deep --force --options runtime \
-            --sign "Developer ID Application" \
-            "dist/${APP_NAME}.app"
-
-      - name: Zip for Notarization
-        if: runner.os == 'macOS'
-        run: |
-          /usr/bin/ditto -c -k --keepParent \
-            "dist/${APP_NAME}.app" \
-            "dist/${APP_NAME}.zip"
-
-      - name: Notarize the App
-        if: runner.os == 'macOS'
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          xcrun notarytool submit "dist/${APP_NAME}.zip" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$TEAM_ID" \
-            --wait
-
-      - name: Staple the Ticket and Final Zip
-        if: runner.os == 'macOS'
-        run: |
-          xcrun stapler staple "dist/${APP_NAME}.app"
-          rm "dist/${APP_NAME}.zip"
           /usr/bin/ditto -c -k --keepParent \
             "dist/${APP_NAME}.app" \
             "dist/${APP_NAME}.zip"
