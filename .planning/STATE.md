@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 06-03-PLAN.md
-last_updated: "2026-04-03T05:02:49.879Z"
+status: executing
+stopped_at: Completed 07-01-PLAN.md
+last_updated: "2026-04-03T05:33:41.714Z"
 last_activity: 2026-04-03
 progress:
   total_phases: 8
   completed_phases: 6
-  total_plans: 24
-  completed_plans: 22
+  total_plans: 26
+  completed_plans: 23
   percent: 12
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-30)
 
 **Core value:** Researchers can run a complete motor imagery BCI experiment -- from signal conditioning through real-time cursor decoding -- entirely within this GUI.
-**Current focus:** Phase 06 — 1d-up-down-decoder-and-2d-cursor-task
+**Current focus:** Phase 07 — asynchronous-free-cursor-mode
 
 ## Current Position
 
-Phase: 06 (1d-up-down-decoder-and-2d-cursor-task) — EXECUTING
-Plan: 3 of 3
-Status: Phase complete — ready for verification
+Phase: 07 (asynchronous-free-cursor-mode) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-04-03
 
 Progress: [██░░░░░░░░] 12%
@@ -67,6 +67,7 @@ Progress: [██░░░░░░░░] 12%
 | Phase 06 P02 | 2min | 2 tasks | 2 files |
 | Phase 06 P01 | 7min | 2 tasks | 4 files |
 | Phase 06 P03 | 2min | 2 tasks | 1 files |
+| Phase 07 P01 | 3min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -98,6 +99,8 @@ Progress: [██░░░░░░░░] 12%
 - [Phase 06]: save_weights/load_weights extended with axis field; load returns 3-tuple (csp, lda, axis) backward-compatible
 - [Phase 06]: UD weights auto-save as csp_lda_weights_ud.json; dual model slots _csp_filter_ud/_lda_classifier_ud
 - [Phase 06]: 2D Cursor action gated via _update_2d_gate; CSP-decoded certainty overrides band-power tf when both decoders loaded
+- [Phase 07]: FREE mode uses separate updateFree/drawFree loop to keep cued state machine untouched
+- [Phase 07]: Cursor position markers sent as JSON with type=cursor_pos via existing send_marker channel
 
 ### Pending Todos
 
@@ -111,6 +114,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-03T05:02:49.873Z
-Stopped at: Completed 06-03-PLAN.md
+Last session: 2026-04-03T05:33:41.709Z
+Stopped at: Completed 07-01-PLAN.md
 Resume file: None

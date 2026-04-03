@@ -87,9 +87,9 @@
 
 ### Asynchronous Free-Cursor
 
-- [ ] **ASYN-01**: Free-cursor mode with no cue prompts — subject controls 2D cursor position freely
-- [ ] **ASYN-02**: Real-time 2D decoding at display rate using trained CSP+LDA pipeline
-- [ ] **ASYN-03**: Session recorded to XDF with continuous decoded position markers
+- [x] **ASYN-01**: Free-cursor mode with no cue prompts — subject controls 2D cursor position freely
+- [x] **ASYN-02**: Real-time 2D decoding at display rate using trained CSP+LDA pipeline
+- [x] **ASYN-03**: Session recorded to XDF with continuous decoded position markers
 
 ## v2 Requirements
 
@@ -170,9 +170,9 @@
 | CUR2-02 | Phase 6 | Complete |
 | CUR2-03 | Phase 6 | Complete |
 | CUR2-04 | Phase 6 | Complete |
-| ASYN-01 | Phase 7 | Pending |
-| ASYN-02 | Phase 7 | Pending |
-| ASYN-03 | Phase 7 | Pending |
+| ASYN-01 | Phase 7 | Complete |
+| ASYN-02 | Phase 7 | Complete |
+| ASYN-03 | Phase 7 | Complete |
 
 **Coverage:**
 - v1 requirements: 49 total

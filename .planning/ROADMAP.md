@@ -131,7 +131,7 @@ Plans:
   3. The session records to XDF with continuous decoded cursor position as markers, using the same format as cued task recordings
 **Plans:** 2 plans
 Plans:
-- [ ] 07-01-PLAN.md -- FREE mode in app.js (no cues/targets, continuous cursor, position markers) + Free Cursor button in GUI
+- [x] 07-01-PLAN.md -- FREE mode in app.js (no cues/targets, continuous cursor, position markers) + Free Cursor button in GUI
 - [ ] 07-02-PLAN.md -- Integration tests and human verification of complete FREE cursor mode
 
 ## Progress
