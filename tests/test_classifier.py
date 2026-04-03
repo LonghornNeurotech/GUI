@@ -254,3 +254,154 @@ def test_inference_chain() -> None:
     assert isinstance(shaped, float)
     # Transfer function output is in [-0.9009, 0.9009] or 0.0
     assert -1.0 <= shaped <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Integration Tests -- full pipeline
+# ---------------------------------------------------------------------------
+
+_INT_RNG = np.random.default_rng(99)
+
+
+def _generate_synthetic_session(
+    n_channels: int = 8,
+    srate: float = 250.0,
+    n_trials_per_class: int = 50,
+    trial_duration: float = 4.0,
+    inter_trial_gap: float = 2.0,
+) -> tuple[np.ndarray, list[tuple[str, float]]]:
+    """Generate synthetic EEG session with LEFT/RIGHT class separation.
+
+    Class 1 (LEFT): elevated variance on channels 0-1 (multiply by 5).
+    Class 2 (RIGHT): elevated variance on channels 6-7 (multiply by 5).
+    Markers alternate LEFT/RIGHT at evenly spaced intervals.
+
+    Returns
+    -------
+    tuple[np.ndarray, list[tuple[str, float]]]
+        (eeg_data, markers) where eeg_data is (n_channels, n_samples).
+    """
+    total_trials = n_trials_per_class * 2
+    trial_samples = int(trial_duration * srate)
+    gap_samples = int(inter_trial_gap * srate)
+    segment_samples = trial_samples + gap_samples
+    total_samples = total_trials * segment_samples + int(srate)  # +1s buffer
+
+    eeg = _INT_RNG.standard_normal((n_channels, total_samples)) * 0.5
+    markers: list[tuple[str, float]] = []
+
+    classes = ["LEFT", "RIGHT"]
+    for i in range(total_trials):
+        cls = classes[i % 2]
+        start_sample = i * segment_samples + int(srate * 0.5)  # 0.5s offset
+        end_sample = start_sample + trial_samples
+        if end_sample > total_samples:
+            break
+        if cls == "LEFT":
+            eeg[0:2, start_sample:end_sample] *= 5.0
+        else:
+            eeg[6:8, start_sample:end_sample] *= 5.0
+        markers.append((cls, start_sample / srate))
+
+    return eeg, markers
+
+
+class TestFullPipelineIntegration:
+    """Integration tests: extract_epochs -> BCITrainer -> save -> load -> inference."""
+
+    def test_full_pipeline_roundtrip(self, tmp_path: object) -> None:
+        """Full pipeline: extract -> train -> save -> load -> identical inference."""
+        eeg, markers = _generate_synthetic_session()
+        epochs = extract_epochs(eeg, markers, srate=250.0, window_sec=4.0)
+
+        assert len(epochs["LEFT"]) == 50
+        assert len(epochs["RIGHT"]) == 50
+
+        trainer = BCITrainer(min_trials_per_class=40, n_components=4)
+        csp, lda = trainer.fit(epochs)
+
+        # Generate a test chunk matching class 1 pattern
+        test_chunk = _INT_RNG.standard_normal((8, 1000)) * 0.5
+        test_chunk[0:2, :] *= 5.0
+
+        original_feat = csp.transform(test_chunk)
+        original_certainty = lda.predict_certainty(original_feat)
+
+        # Save and reload
+        weight_path = str(tmp_path / "test_weights.json")  # type: ignore[operator]
+        save_weights(weight_path, csp, lda)
+        csp_loaded, lda_loaded = load_weights(weight_path)
+
+        loaded_feat = csp_loaded.transform(test_chunk)
+        loaded_certainty = lda_loaded.predict_certainty(loaded_feat)
+
+        assert np.isclose(original_certainty, loaded_certainty), (
+            f"Original {original_certainty} != Loaded {loaded_certainty}"
+        )
+
+    def test_full_pipeline_with_transfer_function(self) -> None:
+        """Pipeline output through transfer function stays in valid range."""
+        eeg, markers = _generate_synthetic_session()
+        epochs = extract_epochs(eeg, markers, srate=250.0, window_sec=4.0)
+
+        trainer = BCITrainer(min_trials_per_class=40, n_components=4)
+        csp, lda = trainer.fit(epochs)
+
+        test_chunk = _INT_RNG.standard_normal((8, 1000)) * 0.5
+        test_chunk[6:8, :] *= 5.0  # RIGHT-like pattern
+
+        feat = csp.transform(test_chunk)
+        certainty = lda.predict_certainty(feat)
+        shaped = apply_transfer_function(certainty, r=1.0)
+
+        assert isinstance(shaped, float)
+        assert abs(shaped) <= 0.9009 + 1e-6, (
+            f"Transfer function output {shaped} exceeds 0.9009"
+        )
+
+    def test_gate_rejects_insufficient_trials(self) -> None:
+        """BCITrainer rejects sessions with fewer than 40 trials per class."""
+        eeg, markers = _generate_synthetic_session(n_trials_per_class=20)
+        epochs = extract_epochs(eeg, markers, srate=250.0, window_sec=4.0)
+
+        assert len(epochs["LEFT"]) == 20
+        assert len(epochs["RIGHT"]) == 20
+
+        trainer = BCITrainer(min_trials_per_class=40, n_components=4)
+        with pytest.raises(ValueError, match="40 trials"):
+            trainer.fit(epochs)
+
+    def test_extract_epochs_real_format(self) -> None:
+        """Markers in JSON format '{"start":"LEFT"}' are extracted correctly."""
+        eeg, _ = _generate_synthetic_session(n_trials_per_class=5)
+        json_markers: list[tuple[str, float]] = [
+            ('{"start":"LEFT"}', 1.0),
+            ('{"start":"RIGHT"}', 8.0),
+            ('{"start":"LEFT"}', 15.0),
+        ]
+        epochs = extract_epochs(eeg, json_markers, srate=250.0, window_sec=4.0)
+        assert len(epochs["LEFT"]) == 2
+        assert len(epochs["RIGHT"]) == 1
+
+    def test_loaded_weights_inference_matches_trained(
+        self, tmp_path: object
+    ) -> None:
+        """Loaded classifier matches trained on 10 random test chunks."""
+        eeg, markers = _generate_synthetic_session()
+        epochs = extract_epochs(eeg, markers, srate=250.0, window_sec=4.0)
+
+        trainer = BCITrainer(min_trials_per_class=40, n_components=4)
+        csp, lda = trainer.fit(epochs)
+
+        weight_path = str(tmp_path / "multi_weights.json")  # type: ignore[operator]
+        save_weights(weight_path, csp, lda)
+        csp_loaded, lda_loaded = load_weights(weight_path)
+
+        rng = np.random.default_rng(123)
+        for _ in range(10):
+            chunk = rng.standard_normal((8, 1000))
+            orig_cert = lda.predict_certainty(csp.transform(chunk))
+            load_cert = lda_loaded.predict_certainty(csp_loaded.transform(chunk))
+            assert np.isclose(orig_cert, load_cert), (
+                f"Mismatch: original={orig_cert}, loaded={load_cert}"
+            )
