@@ -18,9 +18,9 @@ from PyQt6.QtWidgets import (
     QCheckBox, QSlider, QSpinBox, QPushButton, QLabel, QGroupBox,
     QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QRadioButton, QButtonGroup,
     QFileDialog, QMessageBox, QComboBox, QLineEdit, QTabWidget, QMenu, QWidgetAction, QScrollArea,
-    QInputDialog, QToolButton, QSizePolicy, QProgressBar, QGridLayout, QSpacerItem
+    QInputDialog, QToolButton, QSizePolicy, QProgressBar, QGridLayout, QSpacerItem, QFrame
 )
-from PyQt6.QtCore import Qt, QTimer, QSize
+from PyQt6.QtCore import Qt, QTimer, QSize, QThread, pyqtSignal
 from PyQt6.QtGui import QPalette, QColor, QKeySequence, QShortcut, QAction, QIcon, QPixmap, QDesktopServices
 import platform
 import time
@@ -105,6 +105,9 @@ from dsp.quality import SignalQualityMonitor
 # Band power extraction and control signals
 from dsp.band_power import BandPowerExtractor, RestBaselineTracker, ControlSignals
 from dsp.transfer_function import apply_transfer_function
+from dsp.classifier import (
+    extract_epochs, BCITrainer, CSPFilter, LDAClassifier, save_weights, load_weights,
+)
 
 # Auto-updater
 from updater import prompt_update_if_available, check_for_updates, apply_update
@@ -697,6 +700,40 @@ class LaplacianConfigDialog(QDialog):
         return result
 
 
+class TrainWorker(QThread):
+    """Background worker for CSP+LDA training.
+
+    Emits progress updates and delivers fitted CSP/LDA objects on completion.
+    """
+
+    progress = pyqtSignal(int, str)  # (percent, status_message)
+    finished = pyqtSignal(object, object)  # (CSPFilter, LDAClassifier)
+    error = pyqtSignal(str)
+
+    def __init__(
+        self,
+        epochs: dict[str, list],
+        n_components: int = 4,
+        parent: QThread | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._epochs = epochs
+        self._n_components = n_components
+
+    def run(self) -> None:
+        try:
+            trainer = BCITrainer(
+                min_trials_per_class=40, n_components=self._n_components
+            )
+            self.progress.emit(10, "Validating trials...")
+            self.progress.emit(30, "Computing covariance matrices...")
+            csp, lda = trainer.fit(self._epochs)
+            self.progress.emit(100, "Training complete")
+            self.finished.emit(csp, lda)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class SegmentViewer(QMainWindow):
     def __init__(self, window_size_sec=10.0, sampling_rate=125):
         super().__init__()
@@ -831,6 +868,13 @@ class SegmentViewer(QMainWindow):
         # Channel mapping (C3 / C4 for motor imagery)
         self._c3_channel: int = 0
         self._c4_channel: int = 1
+
+        # CSP+LDA training state
+        self._csp_filter: CSPFilter | None = None
+        self._lda_classifier: LDAClassifier | None = None
+        self._train_worker: TrainWorker | None = None
+        self._loaded_epochs: dict[str, list] | None = None
+        self._xdf_dir: str | None = None
 
         # Streaming plot item references (reused to avoid memory leak)
         self.streaming_plot_items = {}  # Channel index -> PlotDataItem
@@ -1339,6 +1383,52 @@ class SegmentViewer(QMainWindow):
         r_row.addWidget(self.r_factor_spinbox)
         cs_layout.addLayout(r_row)
 
+        # --- CSP+LDA Training Sub-section ---
+        csp_sep = QFrame()
+        csp_sep.setFrameShape(QFrame.Shape.HLine)
+        csp_sep.setFrameShadow(QFrame.Shadow.Sunken)
+        cs_layout.addWidget(csp_sep)
+
+        csp_header = QLabel("CSP+LDA Training")
+        csp_header.setStyleSheet("font-weight: bold; font-size: 12px;")
+        cs_layout.addWidget(csp_header)
+
+        self._trial_count_label = QLabel("LEFT: -- | RIGHT: --")
+        self._trial_count_label.setStyleSheet("font-size: 11px;")
+        cs_layout.addWidget(self._trial_count_label)
+
+        self._train_btn = QPushButton("Train CSP+LDA")
+        self._train_btn.setEnabled(False)
+        self._train_btn.setToolTip("Load an XDF with 40+ LEFT and RIGHT trials to enable")
+        self._train_btn.clicked.connect(self._on_train_clicked)
+        cs_layout.addWidget(self._train_btn)
+
+        self._train_progress = QProgressBar()
+        self._train_progress.setRange(0, 100)
+        self._train_progress.setFixedHeight(20)
+        self._train_progress.setVisible(False)
+        cs_layout.addWidget(self._train_progress)
+
+        self._train_status = QLabel("")
+        self._train_status.setStyleSheet("font-size: 11px;")
+        cs_layout.addWidget(self._train_status)
+
+        weights_row = QHBoxLayout()
+        self._load_weights_btn = QPushButton("Load Weights")
+        self._load_weights_btn.clicked.connect(self._on_load_weights)
+        weights_row.addWidget(self._load_weights_btn)
+
+        self._save_weights_btn = QPushButton("Save Weights")
+        self._save_weights_btn.setEnabled(False)
+        self._save_weights_btn.clicked.connect(self._on_save_weights)
+        weights_row.addWidget(self._save_weights_btn)
+        cs_layout.addLayout(weights_row)
+
+        self._weights_path_label = QLabel("--")
+        self._weights_path_label.setStyleSheet("font-size: 10px; color: gray;")
+        self._weights_path_label.setWordWrap(True)
+        cs_layout.addWidget(self._weights_path_label)
+
         self.control_signals_group.setLayout(cs_layout)
         self.control_signals_group.setEnabled(False)
         left_panel_layout.addWidget(self.control_signals_group)
@@ -1713,6 +1803,31 @@ class SegmentViewer(QMainWindow):
                     return
                 self.raw_data, srate, ch_names, self.markers = self._load_xdf(file_path)
                 file_metadata = {'sfreq': srate, 'ch_names': ch_names}
+                # Extract epochs for CSP+LDA training
+                self._xdf_dir = os.path.dirname(file_path)
+                # _load_xdf returns (time_sec, label) but extract_epochs wants (label, time_sec)
+                swapped_markers = [(lbl, ts) for ts, lbl in self.markers]
+                try:
+                    self._loaded_epochs = extract_epochs(
+                        self.raw_data, swapped_markers, srate
+                    )
+                    n_left = len(self._loaded_epochs.get("LEFT", []))
+                    n_right = len(self._loaded_epochs.get("RIGHT", []))
+                    self._trial_count_label.setText(
+                        f"LEFT: {n_left} | RIGHT: {n_right}"
+                    )
+                    if n_left >= 40 and n_right >= 40:
+                        self._train_btn.setEnabled(True)
+                        self._train_btn.setToolTip("Train CSP+LDA from loaded trials")
+                    else:
+                        self._train_btn.setEnabled(False)
+                        self._train_btn.setToolTip(
+                            f"Need 40+ trials per class (have LEFT={n_left}, RIGHT={n_right})"
+                        )
+                except Exception:
+                    self._loaded_epochs = None
+                    self._trial_count_label.setText("LEFT: 0 | RIGHT: 0")
+                    self._train_btn.setEnabled(False)
             else:
                 QMessageBox.warning(self, "Error", "Unsupported file type. Please select a .gdf, .pkl, or .xdf file.")
                 return
@@ -4393,6 +4508,91 @@ class SegmentViewer(QMainWindow):
         self._last_control_signals = None
         self.lr_readout.setText("--")
         self.ud_readout.setText("--")
+
+    # ------------------------------------------------------------------
+    # CSP+LDA training slots
+    # ------------------------------------------------------------------
+
+    def _on_train_clicked(self) -> None:
+        """Start CSP+LDA training in a background thread."""
+        if self._loaded_epochs is None:
+            return
+        self._train_btn.setEnabled(False)
+        self._train_progress.setValue(0)
+        self._train_progress.setVisible(True)
+        self._train_status.setText("Starting training...")
+
+        self._train_worker = TrainWorker(self._loaded_epochs, parent=self)
+        self._train_worker.progress.connect(self._on_train_progress)
+        self._train_worker.finished.connect(self._on_train_finished)
+        self._train_worker.error.connect(self._on_train_error)
+        self._train_worker.start()
+
+    def _on_train_progress(self, percent: int, message: str) -> None:
+        """Update progress bar and status label from training worker."""
+        self._train_progress.setValue(percent)
+        self._train_status.setText(message)
+
+    def _on_train_finished(self, csp: object, lda: object) -> None:
+        """Handle successful training completion."""
+        self._csp_filter = csp
+        self._lda_classifier = lda
+        self._save_weights_btn.setEnabled(True)
+        self._train_status.setText("Training complete -- ready for online classification")
+        self._train_progress.setVisible(False)
+        self._train_btn.setEnabled(True)
+
+        # Auto-save weights to XDF directory
+        if self._xdf_dir:
+            default_path = os.path.join(self._xdf_dir, "csp_lda_weights.json")
+            try:
+                save_weights(default_path, self._csp_filter, self._lda_classifier)
+                self._weights_path_label.setText(default_path)
+            except Exception as e:
+                self._train_status.setText(f"Trained but auto-save failed: {e}")
+
+    def _on_train_error(self, msg: str) -> None:
+        """Handle training error."""
+        QMessageBox.warning(self, "Training Error", msg)
+        self._train_btn.setEnabled(True)
+        self._train_progress.setVisible(False)
+        self._train_status.setText("")
+
+    def _on_load_weights(self) -> None:
+        """Load CSP+LDA weights from a JSON file."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load CSP+LDA Weights", "", "JSON Files (*.json)"
+        )
+        if not path:
+            return
+        try:
+            csp, lda = load_weights(path)
+            self._csp_filter = csp
+            self._lda_classifier = lda
+            self._save_weights_btn.setEnabled(True)
+            self._weights_path_label.setText(path)
+            self._train_status.setText("Weights loaded successfully")
+        except Exception as e:
+            QMessageBox.warning(self, "Load Error", f"Failed to load weights:\n{e}")
+
+    def _on_save_weights(self) -> None:
+        """Save CSP+LDA weights to a JSON file."""
+        if self._csp_filter is None or self._lda_classifier is None:
+            return
+        default_dir = self._xdf_dir or ""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save CSP+LDA Weights", default_dir, "JSON Files (*.json)"
+        )
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += ".json"
+        try:
+            save_weights(path, self._csp_filter, self._lda_classifier)
+            self._weights_path_label.setText(path)
+            self._train_status.setText("Weights saved successfully")
+        except Exception as e:
+            QMessageBox.warning(self, "Save Error", f"Failed to save weights:\n{e}")
 
     # ------------------------------------------------------------------
     # Spatial filter slots
