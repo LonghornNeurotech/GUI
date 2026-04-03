@@ -19,6 +19,7 @@
                 </div>
                 <h1 class="main-title">Welcome<br>Data acquisition</h1>
                 <p class="sub-title">Subject Data</p>
+                <span id="mode-indicator" style="display:inline-block; margin-top:6px; padding:3px 10px; border-radius:4px; font-size:0.65rem; font-family:'Space Grotesk',sans-serif; background:rgba(0,242,255,0.15); color:#00f2ff; letter-spacing:1px;"></span>
             </div>
             
             <div class="glass-card scrollable">
@@ -46,6 +47,7 @@
                 <div class="input-row">
                     <label>Number of Cycles</label>
                     <input type="number" id="numCycles" value="5" min="1" step="1">
+                    <span id="cycle-info" style="font-size:0.65rem; color:#888; margin-top:2px;"></span>
                 </div>
                 <div class="input-row align-top">
                     <label>Save Location</label>
@@ -63,8 +65,8 @@
             <div class="glass-card instruction-text">
                 <div class="guide-item"><span>STEP 1</span> Focus gaze on the <b>central crosshair</b> at all times.</div>
                 <div class="guide-item"><span>STEP 2</span> <b>REST (blue circle):</b> You <b>may blink</b> here. Clear your mind.</div>
-                <div class="guide-item"><span>STEP 3</span> <b>LEFT / RIGHT:</b> Imagine the movement as the letter fills. <b>Do NOT blink.</b></div>
-                <div class="guide-item"><span>STEP 4</span> Pattern: <b>REST → LEFT or RIGHT → REST → LEFT or RIGHT → …</b></div>
+                <div class="guide-item" id="guide-directions"><span>STEP 3</span> <b>LEFT / RIGHT:</b> Imagine the movement as the arrow appears. <b>Do NOT blink.</b></div>
+                <div class="guide-item" id="guide-pattern"><span>STEP 4</span> Pattern: <b>REST → LEFT or RIGHT → REST → LEFT or RIGHT → …</b></div>
                 <button onclick="startMindfulness()" class="btn-primary accent">Enter Mindfulness Phase</button>
             </div>
         </div>
@@ -123,6 +125,18 @@
         });
         el.innerHTML = html;
     }
+    </script>
+    <script>
+    (function() {
+        var p = new URLSearchParams(window.location.search);
+        var mode = (p.get("mode") || "LR").toUpperCase();
+        var labels = { LR: "Mode: 1D Left / Right", UD: "Mode: 1D Up / Down", "2D": "Mode: 2D Cursor Task" };
+        var el = document.getElementById("mode-indicator");
+        if (el) el.textContent = labels[mode] || ("Mode: " + mode);
+        var info = document.getElementById("cycle-info");
+        if (info && mode === "2D") info.textContent = "Each cycle = 4 trials (L/R/U/D)";
+        else if (info) info.textContent = "Each cycle = 2 trials";
+    })();
     </script>
     <script src="app.js"></script>
 </body>
