@@ -921,6 +921,8 @@ class SegmentViewer(QMainWindow):
         self._lda_classifier: LDAClassifier | None = None
         self._csp_filter_ud: CSPFilter | None = None
         self._lda_classifier_ud: LDAClassifier | None = None
+        self._last_lr_certainty: float | None = None
+        self._last_ud_certainty: float | None = None
         self._detected_axis: str | None = None
         self._train_worker: TrainWorker | None = None
         self._loaded_epochs: dict[str, list] | None = None
@@ -1162,8 +1164,17 @@ class SegmentViewer(QMainWindow):
             lambda: (setattr(self, '_active_task', "Myo Armband"),
                      self.task_launcher_btn.setText("Myo Armband"),
                      self.launch_myo()))
+        mi_2d_action = QAction("2D Cursor", self)
+        mi_2d_action.setEnabled(False)  # disabled until both LR and UD weights loaded
+        mi_2d_action.triggered.connect(
+            lambda: (setattr(self, '_active_task', "2D Cursor"),
+                     self.task_launcher_btn.setText("2D Cursor"),
+                     self.motor_imagery_task("2D")))
+        self._mi_2d_action = mi_2d_action
+
         self._task_menu.addAction(mi_lr_action)
         self._task_menu.addAction(mi_ud_action)
+        self._task_menu.addAction(mi_2d_action)
         self._task_menu.addAction(prosthetic_action)
         self._task_menu.addAction(myo_action)
 
@@ -4095,13 +4106,19 @@ class SegmentViewer(QMainWindow):
             if self.spatial_filter is not None and self.spatial_filter.enabled:
                 filtered_data = self.spatial_filter.process(filtered_data)
 
-            # --- CSP+LDA real-time inference for feedback bar ---
+            # --- CSP+LDA real-time inference ---
             if self._csp_filter is not None and self._lda_classifier is not None:
-                csp_features = self._csp_filter.transform(filtered_data)
-                certainty = self._lda_classifier.predict_certainty(csp_features)
-                r = self.r_factor_spinbox.value()
-                shaped_certainty = apply_transfer_function(certainty, r)
-                self._feedback_bar.set_value(shaped_certainty)
+                csp_features_lr = self._csp_filter.transform(filtered_data)
+                lr_certainty = self._lda_classifier.predict_certainty(csp_features_lr)
+                self._last_lr_certainty = lr_certainty
+                r_lr = self.r_factor_spinbox.value()
+                shaped_lr = apply_transfer_function(lr_certainty, r_lr)
+                self._feedback_bar.set_value(shaped_lr)
+
+            if self._csp_filter_ud is not None and self._lda_classifier_ud is not None:
+                csp_features_ud = self._csp_filter_ud.transform(filtered_data)
+                ud_certainty = self._lda_classifier_ud.predict_certainty(csp_features_ud)
+                self._last_ud_certainty = ud_certainty
 
             # --- Band power extraction and control signal computation ---
             c3_idx = self.c3_combo.currentIndex() - 1  # -1 because index 0 is "Select..."
@@ -4561,8 +4578,18 @@ class SegmentViewer(QMainWindow):
             return
         r_lr = self.r_factor_spinbox.value()
         r_ud = self.r_factor_ud_spinbox.value()
-        tf_lr = apply_transfer_function(cs.lr, r_lr)
-        tf_ud = apply_transfer_function(cs.ud, r_ud)
+
+        # If both CSP+LDA decoders loaded, use decoded certainty for transfer
+        # function input -- gives the 2D task CSP-decoded control instead of
+        # raw band power.
+        if (self._csp_filter is not None and self._lda_classifier is not None
+                and self._csp_filter_ud is not None and self._lda_classifier_ud is not None):
+            tf_lr = apply_transfer_function(self._last_lr_certainty or 0.0, r_lr)
+            tf_ud = apply_transfer_function(self._last_ud_certainty or 0.0, r_ud)
+        else:
+            tf_lr = apply_transfer_function(cs.lr, r_lr)
+            tf_ud = apply_transfer_function(cs.ud, r_ud)
+
         self.lr_readout.setText(f"{tf_lr:+.3f}")
         self.ud_readout.setText(f"{tf_ud:+.3f}")
         payload = {
@@ -4599,6 +4626,12 @@ class SegmentViewer(QMainWindow):
         self._last_control_signals = None
         self.lr_readout.setText("--")
         self.ud_readout.setText("--")
+
+    def _update_2d_gate(self) -> None:
+        """Enable/disable 2D Cursor action based on both LR and UD weights."""
+        has_lr = self._csp_filter is not None and self._lda_classifier is not None
+        has_ud = self._csp_filter_ud is not None and self._lda_classifier_ud is not None
+        self._mi_2d_action.setEnabled(has_lr and has_ud)
 
     # ------------------------------------------------------------------
     # CSP+LDA training slots
@@ -4660,6 +4693,8 @@ class SegmentViewer(QMainWindow):
             except Exception as e:
                 self._train_status.setText(f"Trained but auto-save failed: {e}")
 
+        self._update_2d_gate()
+
     def _on_train_error(self, msg: str) -> None:
         """Handle training error."""
         QMessageBox.warning(self, "Training Error", msg)
@@ -4693,6 +4728,8 @@ class SegmentViewer(QMainWindow):
             # Show feedback bar if currently streaming
             if self.streaming_active:
                 self._feedback_bar.setVisible(True)
+
+            self._update_2d_gate()
         except Exception as e:
             QMessageBox.warning(self, "Load Error", f"Failed to load weights:\n{e}")
 
