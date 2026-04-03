@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-04-03T00:51:45.648Z"
+status: executing
+stopped_at: Completed 04-03-PLAN.md
+last_updated: "2026-04-03T01:25:49.323Z"
 last_activity: 2026-04-03
 progress:
   total_phases: 8
   completed_phases: 4
-  total_plans: 13
-  completed_plans: 13
+  total_plans: 17
+  completed_plans: 14
   percent: 12
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-30)
 
 **Core value:** Researchers can run a complete motor imagery BCI experiment -- from signal conditioning through real-time cursor decoding -- entirely within this GUI.
-**Current focus:** Phase 03 — band-power-and-control-signals
+**Current focus:** Phase 04 — transfer-function-and-1d-motor-imagery-tasks
 
 ## Current Position
 
-Phase: 03 (band-power-and-control-signals) — EXECUTING
-Plan: 3 of 3
-Status: Phase complete — ready for verification
+Phase: 04 (transfer-function-and-1d-motor-imagery-tasks) — EXECUTING
+Plan: 2 of 4
+Status: Ready to execute
 Last activity: 2026-04-03
 
 Progress: [██░░░░░░░░] 12%
@@ -58,6 +58,7 @@ Progress: [██░░░░░░░░] 12%
 | Phase 03 P01 | 3min | 2 tasks | 3 files |
 | Phase 03 P02 | 2min | 2 tasks | 1 files |
 | Phase 03 P03 | 2min | 2 tasks | 3 files |
+| Phase 04 P03 | 3min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,8 @@ Progress: [██░░░░░░░░] 12%
 - [Phase 03]: Band power computed before streaming_active guard so control signals update even when viz paused
 - [Phase 03]: Control signal push follows exact _push_quality_to_task_overlay pattern for consistency
 - [Phase 03]: JS receiver stores data on window._lastControlSignals for Phase 4 transfer function consumption
+- [Phase 04]: LR/UD readouts show transfer-function-shaped values, not raw z-scores
+- [Phase 04]: Both raw and transformed control signals sent in payload for JS flexibility
 
 ### Pending Todos
 
@@ -88,6 +91,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-03T00:51:45.642Z
-Stopped at: Completed 03-03-PLAN.md
+Last session: 2026-04-03T01:25:49.319Z
+Stopped at: Completed 04-03-PLAN.md
 Resume file: None

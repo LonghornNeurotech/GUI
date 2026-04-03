@@ -92,7 +92,7 @@ Plans:
 Plans:
 - [ ] 04-01-PLAN.md -- TDD: TransferFunction class in dsp/transfer_function.py with full test coverage
 - [ ] 04-02-PLAN.md -- Extend tasks/motor_imagery/ with MINDFULNESS state, mode param, arrow cues
-- [ ] 04-03-PLAN.md -- Wire transfer function into GUI.py with R factor spinbox and task launch buttons
+- [x] 04-03-PLAN.md -- Wire transfer function into GUI.py with R factor spinbox and task launch buttons
 - [ ] 04-04-PLAN.md -- Integration verification of complete 1D LR and 1D UD task flows
 
 ### Phase 5: CSP Training, LDA Classifier, and Feedback Bar

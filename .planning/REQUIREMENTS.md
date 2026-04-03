@@ -48,21 +48,21 @@
 
 ### Band Power & Control Signals
 
-- [ ] **BPOW-01**: Mu-rhythm (8-13 Hz) band power extracted from C3 and C4 in real-time
-- [ ] **BPOW-02**: LR control signal computed as C4-C3 mu power difference
-- [ ] **BPOW-03**: UD control signal computed as C3+C4 mu power sum
-- [ ] **BPOW-04**: Sliding REST-period baseline normalization (not fixed session-start baseline)
-- [ ] **BPOW-05**: Band power values normalized to standard deviations from baseline mean
+- [x] **BPOW-01**: Mu-rhythm (8-13 Hz) band power extracted from C3 and C4 in real-time
+- [x] **BPOW-02**: LR control signal computed as C4-C3 mu power difference
+- [x] **BPOW-03**: UD control signal computed as C3+C4 mu power sum
+- [x] **BPOW-04**: Sliding REST-period baseline normalization (not fixed session-start baseline)
+- [x] **BPOW-05**: Band power values normalized to standard deviations from baseline mean
 
 ### Motor Imagery Tasks — Offline 1D
 
-- [ ] **TASK-01**: 1D Left/Right offline task with minimalist lab-style UI (native PyQt6 or clean web)
+- [x] **TASK-01**: 1D Left/Right offline task with minimalist lab-style UI (native PyQt6 or clean web)
 - [ ] **TASK-02**: Task timing: 60s mindfulness period → repeating 4s cue / 4s rest cycles
 - [ ] **TASK-03**: LEFT and RIGHT cues presented in random or alternating order
 - [ ] **TASK-04**: Blink prompts shown during REST periods only
 - [ ] **TASK-05**: Central crosshair fixation point always visible during task
 - [ ] **TASK-06**: All state transitions emit LSL markers recorded to XDF
-- [ ] **TASK-07**: 1D Up/Down offline task with same timing structure
+- [x] **TASK-07**: 1D Up/Down offline task with same timing structure
 - [ ] **TASK-08**: Configurable number of cycles per run
 
 ### Nonlinear Transfer Function
@@ -70,7 +70,7 @@
 - [ ] **XFER-01**: Dead zone: |x| ≤ 0.05 SD from baseline → output = 0
 - [ ] **XFER-02**: Quadratic region: 0.05 < |x| < 1 → y = 0.1(Rx²) + 0.3·Rx + 2.25×10⁻⁷
 - [ ] **XFER-03**: Saturation: |x| ≥ 1 → output clamps at ±0.9009
-- [ ] **XFER-04**: Subject-specific R weighting factor exposed as configurable parameter (LR: 3-3.5, UD: 0.3-0.6)
+- [x] **XFER-04**: Subject-specific R weighting factor exposed as configurable parameter (LR: 3-3.5, UD: 0.3-0.6)
 
 ### Real-Time Feedback
 
@@ -143,22 +143,22 @@
 | CHAN-01 | Phase 2 | Pending |
 | CHAN-02 | Phase 2 | Pending |
 | CHAN-03 | Phase 2 | Pending |
-| BPOW-01 | Phase 3 | Pending |
-| BPOW-02 | Phase 3 | Pending |
-| BPOW-03 | Phase 3 | Pending |
-| BPOW-04 | Phase 3 | Pending |
-| BPOW-05 | Phase 3 | Pending |
+| BPOW-01 | Phase 3 | Complete |
+| BPOW-02 | Phase 3 | Complete |
+| BPOW-03 | Phase 3 | Complete |
+| BPOW-04 | Phase 3 | Complete |
+| BPOW-05 | Phase 3 | Complete |
 | XFER-01 | Phase 4 | Pending |
 | XFER-02 | Phase 4 | Pending |
 | XFER-03 | Phase 4 | Pending |
-| XFER-04 | Phase 4 | Pending |
-| TASK-01 | Phase 4 | Pending |
+| XFER-04 | Phase 4 | Complete |
+| TASK-01 | Phase 4 | Complete |
 | TASK-02 | Phase 4 | Pending |
 | TASK-03 | Phase 4 | Pending |
 | TASK-04 | Phase 4 | Pending |
 | TASK-05 | Phase 4 | Pending |
 | TASK-06 | Phase 4 | Pending |
-| TASK-07 | Phase 4 | Pending |
+| TASK-07 | Phase 4 | Complete |
 | TASK-08 | Phase 4 | Pending |
 | SPAT-03 | Phase 5 | Pending |
 | SPAT-04 | Phase 5 | Pending |
