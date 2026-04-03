@@ -1,4 +1,4 @@
-# Roadmap: Longhorn Neural Interface Platform — BCI Signal Processing & Motor Imagery v2
+# Roadmap: Longhorn Neural Interface Platform -- BCI Signal Processing & Motor Imagery v2
 
 ## Overview
 
@@ -35,9 +35,9 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. Filter configuration saved for a session is restored automatically when the session is reopened
 **Plans:** 3/3 plans complete
 Plans:
-- [ ] 01-01-PLAN.md — TDD: FilterPipeline core DSP module with full test coverage
-- [ ] 01-02-PLAN.md — Wire FilterPipeline into GUI.py + filter configuration UI panel
-- [ ] 01-03-PLAN.md — Config persistence to session directory + visual verification
+- [ ] 01-01-PLAN.md -- TDD: FilterPipeline core DSP module with full test coverage
+- [ ] 01-02-PLAN.md -- Wire FilterPipeline into GUI.py + filter configuration UI panel
+- [ ] 01-03-PLAN.md -- Config persistence to session directory + visual verification
 
 ### Phase 1.5: GUI Visualization & UX Polish (INSERTED)
 **Goal**: FFT and band power plots are smooth, configurable, and the dark mode theme is consistent with no contrast issues
@@ -74,9 +74,9 @@ Plans:
   4. Control signal values are expressed in standard deviations from the sliding REST-period mean, and a Re-baseline button resets the buffer mid-session
 **Plans:** 3 plans
 Plans:
-- [x] 03-01-PLAN.md — TDD: BandPowerExtractor + RestBaselineTracker + ControlSignals in dsp/band_power.py
-- [x] 03-02-PLAN.md — Wire band power + control signals into GUI.py with Control Signals UI
-- [x] 03-03-PLAN.md — Push control signals to TaskWebBridge + end-to-end integration verification
+- [x] 03-01-PLAN.md -- TDD: BandPowerExtractor + RestBaselineTracker + ControlSignals in dsp/band_power.py
+- [x] 03-02-PLAN.md -- Wire band power + control signals into GUI.py with Control Signals UI
+- [x] 03-03-PLAN.md -- Push control signals to TaskWebBridge + end-to-end integration verification
 
 ### Phase 4: Transfer Function and 1D Motor Imagery Tasks
 **Goal**: Researchers can run complete 1D Left/Right and 1D Up/Down offline motor imagery sessions in a native PyQt6 task window, with a transfer function shaping the decoded control signal using subject-specific parameters
@@ -88,7 +88,12 @@ Plans:
   3. All task state transitions emit LSL markers captured in the XDF recording
   4. Transfer function applies dead zone (|x| <= 0.05 SD -> 0), quadratic scaling, and saturation (>=1 SD -> +/-0.9009) to the raw control signal, with the subject-specific R factor exposed as a configurable parameter
   5. The 1D Up/Down task is available with identical timing structure, using the C3+C4 UD control signal
-**Plans**: TBD
+**Plans:** 4 plans
+Plans:
+- [ ] 04-01-PLAN.md -- TDD: TransferFunction class in dsp/transfer_function.py with full test coverage
+- [ ] 04-02-PLAN.md -- Extend tasks/motor_imagery/ with MINDFULNESS state, mode param, arrow cues
+- [ ] 04-03-PLAN.md -- Wire transfer function into GUI.py with R factor spinbox and task launch buttons
+- [ ] 04-04-PLAN.md -- Integration verification of complete 1D LR and 1D UD task flows
 
 ### Phase 5: CSP Training, LDA Classifier, and Feedback Bar
 **Goal**: Researchers can train a CSP spatial filter and LDA classifier from labeled offline session data and see real-time classification certainty during online streaming without leaving the GUI
@@ -133,7 +138,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 1.5 GUI Visualization & UX Polish | 4/4 | Complete | 2026-03-31 |
 | 2. Signal Quality and Spatial Filters | 3/3 | Complete | 2026-04-01 |
 | 3. Band Power and Control Signals | 0/3 | Planned | - |
-| 4. Transfer Function and 1D Motor Imagery Tasks | 0/TBD | Not started | - |
+| 4. Transfer Function and 1D Motor Imagery Tasks | 0/4 | Planned | - |
 | 5. CSP Training, LDA Classifier, and Feedback Bar | 0/TBD | Not started | - |
 | 6. 1D Up/Down Decoder and 2D Cursor Task | 0/TBD | Not started | - |
 | 7. Asynchronous Free-Cursor Mode | 0/TBD | Not started | - |
