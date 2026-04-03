@@ -961,14 +961,29 @@ class SegmentViewer(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout_container = QHBoxLayout(main_widget)
 
-        # Left panel for controls (scrollable so buttons never get compressed)
-        left_panel_scroll = QScrollArea()
-        left_panel_scroll.setWidgetResizable(True)
-        left_panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        left_panel_scroll.setMaximumWidth(350)
-        left_panel = QWidget()
-        left_panel_layout = QVBoxLayout(left_panel)
-        left_panel_layout.setContentsMargins(4, 4, 4, 4)
+        # Left panel with two tabs: Tasks and Signal Processing
+        left_tab_widget = QTabWidget()
+        left_tab_widget.setMaximumWidth(350)
+
+        # -- Tab 1: Tasks --
+        _tasks_scroll = QScrollArea()
+        _tasks_scroll.setWidgetResizable(True)
+        _tasks_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _tasks_tab = QWidget()
+        _tasks_layout = QVBoxLayout(_tasks_tab)
+        _tasks_layout.setContentsMargins(4, 4, 4, 4)
+
+        # -- Tab 2: Signal Processing --
+        _signal_scroll = QScrollArea()
+        _signal_scroll.setWidgetResizable(True)
+        _signal_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _signal_tab = QWidget()
+        _signal_layout = QVBoxLayout(_signal_tab)
+        _signal_layout.setContentsMargins(4, 4, 4, 4)
+
+        # Alias for code below -- widgets added to left_panel_layout go to tasks tab
+        left_panel_layout = _tasks_layout
+        signal_panel_layout = _signal_layout
 
         # ---- Brand banner (top-left) ----------------------------------------
         self._banner_menu = QMenu(self)
@@ -1365,7 +1380,7 @@ class SegmentViewer(QMainWindow):
 
         self.signal_group.setLayout(signal_layout)
         self.signal_group.setEnabled(False)
-        left_panel_layout.addWidget(self.signal_group)
+        signal_panel_layout.addWidget(self.signal_group)
 
         # ---- Spatial Filter panel ----------------------------------------
         self.spatial_group = QGroupBox("Spatial Filter")
@@ -1388,7 +1403,7 @@ class SegmentViewer(QMainWindow):
 
         self.spatial_group.setLayout(spatial_layout)
         self.spatial_group.setEnabled(False)
-        left_panel_layout.addWidget(self.spatial_group)
+        signal_panel_layout.addWidget(self.spatial_group)
 
         # ---- Channel Mapping panel ----------------------------------------
         self.mapping_group = QGroupBox("Channel Mapping")
@@ -1417,7 +1432,7 @@ class SegmentViewer(QMainWindow):
 
         self.mapping_group.setLayout(mapping_layout)
         self.mapping_group.setEnabled(False)
-        left_panel_layout.addWidget(self.mapping_group)
+        signal_panel_layout.addWidget(self.mapping_group)
 
         # --- Control Signals UI ---
         self.control_signals_group = QGroupBox("Control Signals")
@@ -1511,11 +1526,16 @@ class SegmentViewer(QMainWindow):
 
         self.control_signals_group.setLayout(cs_layout)
         self.control_signals_group.setEnabled(False)
-        left_panel_layout.addWidget(self.control_signals_group)
+        signal_panel_layout.addWidget(self.control_signals_group)
 
         left_panel_layout.addStretch()
-        left_panel_scroll.setWidget(left_panel)
-        main_layout_container.addWidget(left_panel_scroll)
+        signal_panel_layout.addStretch()
+
+        _tasks_scroll.setWidget(_tasks_tab)
+        _signal_scroll.setWidget(_signal_tab)
+        left_tab_widget.addTab(_tasks_scroll, "Tasks")
+        left_tab_widget.addTab(_signal_scroll, "Signal Processing")
+        main_layout_container.addWidget(left_tab_widget)
 
         # Right side: Main content area
         right_panel = QWidget()
@@ -5144,12 +5164,29 @@ class SegmentViewer(QMainWindow):
         # Lock Y-axis to stable max with 10% headroom
         self.band_power_plot_widget.setYRange(0, self.band_power_y_max * 1.1)
 
+    def _close_task_window(self):
+        """Close the task window and clean up."""
+        if hasattr(self, 'task_window') and self.task_window is not None:
+            self.task_window.close()
+            self.task_window = None
+            self.web_view = None
+
     def motor_imagery_task(self, mode: str = "LR"):
         # Parentless window so QWebEngineView's GPU compositor does not
         # interfere with pyqtgraph's OpenGL context in the main window.
         self.task_window = QMainWindow()
         self.task_window.setWindowTitle("Neural Data Acquisition Task")
         self.task_window.resize(1024, 768)
+
+        # Add close button in toolbar
+        task_toolbar = self.task_window.addToolBar("Task Controls")
+        close_action = task_toolbar.addAction("Close Task")
+        close_action.triggered.connect(self._close_task_window)
+
+        # Escape key closes the task window
+        from PyQt6.QtGui import QShortcut, QKeySequence
+        esc_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self.task_window)
+        esc_shortcut.activated.connect(self._close_task_window)
 
         # Create WebEngineView and set it as the central widget
         self.web_view = QWebEngineView()

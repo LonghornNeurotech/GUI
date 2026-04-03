@@ -288,3 +288,235 @@ class FilterPipeline:
                 stage = pipeline.add_notch(float(entry["freq"]), fs=fs)
                 stage.enabled = bool(entry.get("enabled", True))
         return pipeline
+
+
+class SpatialFilterStage:
+    """Spatial filter stage applying a linear mixing matrix W to EEG data.
+
+    Encapsulates both Common Average Reference (CAR) and surface Laplacian
+    spatial filters as an (n_channels x n_channels) weight matrix. The
+    process() interface matches FilterStage so both can be used in the same
+    pipeline loop.
+
+    Parameters
+    ----------
+    name : str
+        Human-readable label (e.g. "CAR 8ch" or "Laplacian 8ch").
+    w : np.ndarray
+        Weight matrix, shape (n_channels, n_channels).
+    filter_type : str
+        "car" or "laplacian".
+    neighbors : dict[int, list[int]] | None
+        Neighbor map used to construct Laplacian W. None for CAR stages.
+    enabled : bool
+        When False, process() returns data unchanged.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        w: np.ndarray,
+        filter_type: str,
+        neighbors: dict[int, list[int]] | None = None,
+        enabled: bool = True,
+    ) -> None:
+        self.name = name
+        self.w = w
+        self.filter_type = filter_type
+        self.neighbors = neighbors
+        self.enabled = enabled
+
+    # ------------------------------------------------------------------
+    # Processing
+    # ------------------------------------------------------------------
+
+    def process(self, data: np.ndarray) -> np.ndarray:
+        """Apply spatial filter to data.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Shape (n_channels, n_samples), float64.
+
+        Returns
+        -------
+        np.ndarray
+            Same shape as input. Returns input unchanged if ``self.enabled``
+            is False.
+        """
+        if not self.enabled:
+            return data
+        return self.w @ data
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
+    def to_config(self) -> dict:
+        """Serialize to a JSON-compatible dict.
+
+        The W matrix is stored as a nested list for lossless roundtrip. This
+        ensures from_config can exactly reproduce the original filter regardless
+        of which bad channels were excluded at construction time.
+
+        Returns
+        -------
+        dict
+            Keys: type, subtype, n_channels, w, neighbors, enabled.
+        """
+        return {
+            "type": "spatial",
+            "subtype": self.filter_type,
+            "n_channels": self.w.shape[0],
+            "w": self.w.tolist(),
+            "neighbors": self.neighbors,
+            "enabled": self.enabled,
+        }
+
+    @classmethod
+    def from_config(cls, config: dict) -> "SpatialFilterStage":
+        """Restore a SpatialFilterStage from a serialized config dict.
+
+        Reconstructs the exact W matrix from the stored ``w`` field, so
+        bad-channel exclusions are preserved across serialization roundtrips.
+
+        Parameters
+        ----------
+        config : dict
+            As produced by :meth:`to_config`.
+
+        Returns
+        -------
+        SpatialFilterStage
+        """
+        subtype = config["subtype"]
+        n_channels = int(config["n_channels"])
+        enabled = bool(config.get("enabled", True))
+
+        # Prefer stored W matrix for exact reconstruction
+        if "w" in config:
+            w = np.array(config["w"], dtype=np.float64)
+            neighbors_raw = config.get("neighbors") or {}
+            neighbors: dict[int, list[int]] | None = None
+            if subtype == "laplacian" and neighbors_raw:
+                neighbors = {int(k): v for k, v in neighbors_raw.items()}
+            stage = cls(
+                name=f"{'CAR' if subtype == 'car' else 'Laplacian'} {n_channels}ch",
+                w=w,
+                filter_type=subtype,
+                neighbors=neighbors,
+                enabled=enabled,
+            )
+            return stage
+
+        # Legacy path: reconstruct from parameters (no W stored)
+        if subtype == "car":
+            stage = cls.make_car(n_channels=n_channels)
+        elif subtype == "laplacian":
+            neighbors_raw = config.get("neighbors") or {}
+            neighbors_int = {int(k): v for k, v in neighbors_raw.items()}
+            stage = cls.make_laplacian(n_channels=n_channels, neighbors=neighbors_int)
+        else:
+            stage = cls(
+                name=f"Spatial {n_channels}ch",
+                w=np.eye(n_channels),
+                filter_type=subtype,
+                enabled=enabled,
+            )
+
+        stage.enabled = enabled
+        return stage
+
+    # ------------------------------------------------------------------
+    # Factory methods
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def make_car(
+        n_channels: int,
+        bad_channels: set[int] | None = None,
+    ) -> "SpatialFilterStage":
+        """Build a Common Average Reference spatial filter stage.
+
+        The reference signal is the mean of all *good* channels. Bad channels
+        are excluded from the reference computation but their output is still
+        computed (each channel minus the good-channel mean).
+
+        If all channels are bad (empty good set), returns an identity matrix
+        (passthrough) to avoid ZeroDivisionError.
+
+        Parameters
+        ----------
+        n_channels : int
+            Total number of EEG channels.
+        bad_channels : set[int] | None
+            Indices of channels to exclude from the reference mean. If None,
+            treated as empty set (all channels used as reference).
+
+        Returns
+        -------
+        SpatialFilterStage
+        """
+        if bad_channels is None:
+            bad_channels = set()
+
+        good = [i for i in range(n_channels) if i not in bad_channels]
+
+        if len(good) == 0:
+            # All channels bad -- return identity (passthrough)
+            w = np.eye(n_channels)
+        else:
+            # W = I - (1/n_good) * reference_columns
+            # Each column j is 1/n_good if j is a good channel, else 0
+            w = np.eye(n_channels, dtype=np.float64)
+            for j in good:
+                w[:, j] -= 1.0 / len(good)
+
+        return SpatialFilterStage(
+            name=f"CAR {n_channels}ch",
+            w=w,
+            filter_type="car",
+            neighbors=None,
+            enabled=True,
+        )
+
+    @staticmethod
+    def make_laplacian(
+        n_channels: int,
+        neighbors: dict[int, list[int]],
+    ) -> "SpatialFilterStage":
+        """Build a surface Laplacian spatial filter stage.
+
+        For each channel with neighbors, the output is channel_input minus
+        the mean of its neighbors' inputs. Channels with no entry in
+        ``neighbors`` are passed through unchanged (identity row).
+
+        If ``neighbors`` is empty, returns an identity matrix (passthrough).
+
+        Parameters
+        ----------
+        n_channels : int
+            Total number of EEG channels.
+        neighbors : dict[int, list[int]]
+            Maps each channel index to a list of its neighbor channel indices.
+
+        Returns
+        -------
+        SpatialFilterStage
+        """
+        w = np.eye(n_channels, dtype=np.float64)
+
+        for ch, nbrs in neighbors.items():
+            if len(nbrs) == 0:
+                continue
+            weight = 1.0 / len(nbrs)
+            for nbr in nbrs:
+                w[ch, nbr] -= weight
+
+        return SpatialFilterStage(
+            name=f"Laplacian {n_channels}ch",
+            w=w,
+            filter_type="laplacian",
+            neighbors=neighbors,
+            enabled=True,
+        )
