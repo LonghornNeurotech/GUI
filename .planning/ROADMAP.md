@@ -129,7 +129,10 @@ Plans:
   1. Free-cursor mode presents no directional cues and no target prompts -- the subject controls the 2D cursor position freely through imagery
   2. Real-time 2D decoding runs at display rate using the trained CSP+LDA pipeline with no additional configuration required beyond loading saved weights
   3. The session records to XDF with continuous decoded cursor position as markers, using the same format as cued task recordings
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 07-01-PLAN.md -- FREE mode in app.js (no cues/targets, continuous cursor, position markers) + Free Cursor button in GUI
+- [ ] 07-02-PLAN.md -- Integration tests and human verification of complete FREE cursor mode
 
 ## Progress
 
@@ -145,4 +148,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 4. Transfer Function and 1D Motor Imagery Tasks | 0/4 | Planned | - |
 | 5. CSP Training, LDA Classifier, and Feedback Bar | 4/4 | Complete   | 2026-04-03 |
 | 6. 1D Up/Down Decoder and 2D Cursor Task | 0/3 | Planned | - |
-| 7. Asynchronous Free-Cursor Mode | 0/TBD | Not started | - |
+| 7. Asynchronous Free-Cursor Mode | 0/2 | Planned | - |
