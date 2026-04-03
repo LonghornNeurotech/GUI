@@ -74,8 +74,8 @@ Plans:
   4. Control signal values are expressed in standard deviations from the sliding REST-period mean, and a Re-baseline button resets the buffer mid-session
 **Plans:** 3 plans
 Plans:
-- [ ] 03-01-PLAN.md — TDD: BandPowerExtractor + RestBaselineTracker + ControlSignals in dsp/band_power.py
-- [ ] 03-02-PLAN.md — Wire band power + control signals into GUI.py with Control Signals UI
+- [x] 03-01-PLAN.md — TDD: BandPowerExtractor + RestBaselineTracker + ControlSignals in dsp/band_power.py
+- [x] 03-02-PLAN.md — Wire band power + control signals into GUI.py with Control Signals UI
 - [ ] 03-03-PLAN.md — Push control signals to TaskWebBridge + end-to-end integration verification
 
 ### Phase 4: Transfer Function and 1D Motor Imagery Tasks

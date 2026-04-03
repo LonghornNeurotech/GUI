@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 01.5-03-PLAN.md
-last_updated: "2026-03-31T09:02:35.102Z"
-last_activity: 2026-03-31
+status: executing
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-04-03T00:47:47.626Z"
+last_activity: 2026-04-03
 progress:
   total_phases: 8
-  completed_phases: 1
-  total_plans: 7
-  completed_plans: 6
+  completed_phases: 3
+  total_plans: 13
+  completed_plans: 12
   percent: 12
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-30)
 
 **Core value:** Researchers can run a complete motor imagery BCI experiment -- from signal conditioning through real-time cursor decoding -- entirely within this GUI.
-**Current focus:** Phase 01.5 — gui-visualization-ux-polish-inserted
+**Current focus:** Phase 03 — band-power-and-control-signals
 
 ## Current Position
 
-Phase: 01.5 (gui-visualization-ux-polish-inserted) — EXECUTING
-Plan: 4 of 4
-Status: Phase complete — ready for verification
-Last activity: 2026-03-31
+Phase: 03 (band-power-and-control-signals) — EXECUTING
+Plan: 3 of 3
+Status: Ready to execute
+Last activity: 2026-04-03
 
 Progress: [██░░░░░░░░] 12%
 
@@ -55,6 +55,8 @@ Progress: [██░░░░░░░░] 12%
 | Phase 01.5 P01.5-01 | 3 min | 4 tasks | 2 files |
 | Phase 01.5 P04 | 1 min | 3 tasks | 0 files |
 | Phase 01.5 P03 | 3min | 2 tasks | 1 files |
+| Phase 03 P01 | 3min | 2 tasks | 3 files |
+| Phase 03 P02 | 2min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -67,6 +69,9 @@ Progress: [██░░░░░░░░] 12%
 - [Phase 1.5]: _load_xdf prefers Filtered_EEG stream, falls back to raw EEG
 - [Phase 1.5]: Filtering moved before visualization gate so filtered data records even when viz paused
 - [Phase 1.5]: Magnitude scaling is display-only; filtered XDF stream stores true amplitude
+- [Phase 03]: Used np.trapezoid instead of np.trapz (removed in NumPy 2.0)
+- [Phase 03]: Z-score per-channel independently, then LR=z_C4-z_C3, UD=z_C3+z_C4
+- [Phase 03]: Band power computed before streaming_active guard so control signals update even when viz paused
 
 ### Pending Todos
 
@@ -80,6 +85,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-31T09:02:35.093Z
-Stopped at: Completed 01.5-03-PLAN.md
+Last session: 2026-04-03T00:47:47.621Z
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None

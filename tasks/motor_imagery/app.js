@@ -348,3 +348,15 @@ function endSession() {
 }
 
 function resetToHome() { location.reload(); }
+
+// --- Control signal receiver (called from Python via runJavaScript) ----------
+
+/**
+ * Receive control signal data from Python GUI.
+ * Called every streaming chunk (~128ms) when C3/C4 are mapped.
+ * @param {Object} data - {lr, ud, mu_c3, mu_c4, baseline_ready}
+ */
+function updateControlSignals(data) {
+    // Store for use by task logic (Phase 4 transfer function will consume this)
+    window._lastControlSignals = data;
+}

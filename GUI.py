@@ -3886,6 +3886,7 @@ class SegmentViewer(QMainWindow):
                     cs = self._baseline_tracker.compute_control_signals(mu_c3, mu_c4)
                     self._last_control_signals = cs
                     self._update_control_signal_readouts(cs)
+                    self._push_control_signals_to_task()
 
             # Push filtered data to XDF recorder (alongside the raw stream).
             # Uses filter-only output -- no display magnitude scaling.
@@ -4315,6 +4316,26 @@ class SegmentViewer(QMainWindow):
             for ch, status in self._channel_quality.items()
         }
         js = f"if(typeof updateChannelQuality==='function')updateChannelQuality({json.dumps(quality_data)});"
+        try:
+            self.web_view.page().runJavaScript(js)
+        except Exception:
+            pass
+
+    def _push_control_signals_to_task(self) -> None:
+        """Send control signal data to the motor imagery task window."""
+        if not hasattr(self, 'web_view') or self.web_view is None:
+            return
+        cs = self._last_control_signals
+        if cs is None:
+            return
+        payload = {
+            "lr": round(cs.lr, 4),
+            "ud": round(cs.ud, 4),
+            "mu_c3": round(cs.mu_c3, 6),
+            "mu_c4": round(cs.mu_c4, 6),
+            "baseline_ready": cs.baseline_ready,
+        }
+        js = f"if(typeof updateControlSignals==='function')updateControlSignals({json.dumps(payload)});"
         try:
             self.web_view.page().runJavaScript(js)
         except Exception:
