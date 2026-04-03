@@ -117,7 +117,7 @@ Plans:
   4. Subject-specific R weighting factors for LR and UD axes are configurable independently
 **Plans:** 3 plans
 Plans:
-- [ ] 06-01-PLAN.md -- UD decoder support: detect_axis, UD epochs, R (UD) spinbox, separate weight file
+- [x] 06-01-PLAN.md -- UD decoder support: detect_axis, UD epochs, R (UD) spinbox, separate weight file
 - [x] 06-02-PLAN.md -- 2D cursor task JS: cursor dot, four target squares, dual-axis movement
 - [ ] 06-03-PLAN.md -- GUI wiring: 2D Cursor button gated on both weights, dual CSP+LDA inference
 

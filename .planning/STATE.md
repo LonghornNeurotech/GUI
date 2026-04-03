@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 06-02-PLAN.md
-last_updated: "2026-04-03T04:14:26.461Z"
+stopped_at: Completed 06-01-PLAN.md
+last_updated: "2026-04-03T04:19:30.359Z"
 last_activity: 2026-04-03
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 24
-  completed_plans: 20
+  completed_plans: 21
   percent: 12
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-03-30)
 ## Current Position
 
 Phase: 06 (1d-up-down-decoder-and-2d-cursor-task) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-04-03
 
@@ -65,6 +65,7 @@ Progress: [██░░░░░░░░] 12%
 | Phase 05 P03 | 3min | 2 tasks | 1 files |
 | Phase 05 P04 | 2min | 2 tasks | 1 files |
 | Phase 06 P02 | 2min | 2 tasks | 2 files |
+| Phase 06 P01 | 7min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -93,6 +94,8 @@ Progress: [██░░░░░░░░] 12%
 - [Phase 05]: FeedbackBar placed after viz_tabs, fixed 30px, CSP+LDA inference inline in update_stream_data
 - [Phase 05]: Synthetic EEG generator uses channel-specific 5x variance scaling for clean CSP class separation in integration tests
 - [Phase 06]: Highlighted target square IS the cue in 2D mode -- no arrows; cursor clamped to [0.05,0.95]; cycle counter uses DIRECTIONS.length
+- [Phase 06]: save_weights/load_weights extended with axis field; load returns 3-tuple (csp, lda, axis) backward-compatible
+- [Phase 06]: UD weights auto-save as csp_lda_weights_ud.json; dual model slots _csp_filter_ud/_lda_classifier_ud
 
 ### Pending Todos
 
@@ -106,6 +109,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-03T04:14:26.412Z
-Stopped at: Completed 06-02-PLAN.md
+Last session: 2026-04-03T04:19:30.309Z
+Stopped at: Completed 06-01-PLAN.md
 Resume file: None
