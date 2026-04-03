@@ -28,9 +28,9 @@
 
 - [ ] **SPAT-01**: User can apply Common Average Reference (CAR) as a spatial filter
 - [ ] **SPAT-02**: User can apply surface Laplacian spatial filter with configurable neighbor channels
-- [ ] **SPAT-03**: User can apply CSP spatial filter trained from labeled offline session data
-- [ ] **SPAT-04**: CSP training requires minimum 40 trials per class before allowing training (overfitting prevention)
-- [ ] **SPAT-05**: CSP weights are saved per subject and loadable for online sessions
+- [x] **SPAT-03**: User can apply CSP spatial filter trained from labeled offline session data
+- [x] **SPAT-04**: CSP training requires minimum 40 trials per class before allowing training (overfitting prevention)
+- [x] **SPAT-05**: CSP weights are saved per subject and loadable for online sessions
 
 ### Signal Quality & Validation
 
@@ -74,9 +74,9 @@
 
 ### Real-Time Feedback
 
-- [ ] **FDBK-01**: Horizontal bar/indicator showing LR classification certainty during online training
-- [ ] **FDBK-02**: Feedback updates at display rate (≥30 Hz)
-- [ ] **FDBK-03**: Bar position reflects decoded LR signal after transfer function
+- [x] **FDBK-01**: Horizontal bar/indicator showing LR classification certainty during online training
+- [x] **FDBK-02**: Feedback updates at display rate (≥30 Hz)
+- [x] **FDBK-03**: Bar position reflects decoded LR signal after transfer function
 
 ### 2D Cursor Task
 
@@ -160,12 +160,12 @@
 | TASK-06 | Phase 4 | Complete |
 | TASK-07 | Phase 4 | Complete |
 | TASK-08 | Phase 4 | Pending |
-| SPAT-03 | Phase 5 | Pending |
-| SPAT-04 | Phase 5 | Pending |
-| SPAT-05 | Phase 5 | Pending |
-| FDBK-01 | Phase 5 | Pending |
-| FDBK-02 | Phase 5 | Pending |
-| FDBK-03 | Phase 5 | Pending |
+| SPAT-03 | Phase 5 | Complete |
+| SPAT-04 | Phase 5 | Complete |
+| SPAT-05 | Phase 5 | Complete |
+| FDBK-01 | Phase 5 | Complete |
+| FDBK-02 | Phase 5 | Complete |
+| FDBK-03 | Phase 5 | Complete |
 | CUR2-01 | Phase 6 | Pending |
 | CUR2-02 | Phase 6 | Pending |
 | CUR2-03 | Phase 6 | Pending |
