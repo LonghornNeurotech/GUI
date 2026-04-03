@@ -29,11 +29,8 @@ jobs:
             name: Linux
             arch: x64
           - os: macos-14
-            name: macOS-ARM
+            name: macOS
             arch: arm64
-          - os: macos-14
-            name: macOS-Intel
-            arch: x64
           - os: windows-latest
             name: Windows
             arch: x64
@@ -155,7 +152,7 @@ jobs:
             Download the appropriate build for your operating system below.
 
             **Windows:** `.exe` file -- run directly
-            **macOS (Apple Silicon M1/M2/M3):** `macOS-ARM` `.zip` -- extract and right-click > Open
-            **macOS (Intel):** `macOS-Intel` `.zip` -- extract and right-click > Open
+            **macOS (Apple Silicon M1/M2/M3/M4):** `.zip` -- extract and right-click > Open
+            **macOS (Intel):** run from source -- `git clone https://github.com/LonghornNeurotech/GUI && cd GUI && pip install -r requirements.txt && python GUI.py`
             **Linux:** executable file -- `chmod +x` and run
           files: artifacts/*

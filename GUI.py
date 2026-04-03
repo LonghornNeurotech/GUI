@@ -3686,6 +3686,10 @@ class SegmentViewer(QMainWindow):
             f"{status}\nChannels: {ch_preview}"
         )
 
+        # Auto-start visualization so streams are visible immediately
+        if not self.streaming_active:
+            self.toggle_streaming_visualization()
+
     def disconnect_headset(self):
         """Disconnect from headset (BrainFlow or LSL inlet)."""
         try:
