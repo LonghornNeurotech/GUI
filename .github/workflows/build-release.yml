@@ -20,11 +20,23 @@ on:
 
 jobs:
   build:
-    name: Build for ${{ matrix.os }}
+    name: Build for ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        include:
+          - os: ubuntu-latest
+            name: Linux
+            arch: x64
+          - os: macos-14
+            name: macOS-ARM
+            arch: arm64
+          - os: macos-14
+            name: macOS-Intel
+            arch: x64
+          - os: windows-latest
+            name: Windows
+            arch: x64
 
     steps:
       - name: Checkout Code
@@ -34,6 +46,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+          architecture: ${{ matrix.arch }}
 
       - name: Install Dependencies
         run: |
@@ -47,13 +60,10 @@ jobs:
           sed -i.bak 's/^_INJECTED = .*/_INJECTED = "build-${{ github.run_number }}"/' version.py
           rm -f version.py.bak
 
-      # Set a single APP_NAME env var used by all subsequent steps.
-      # Tag stays "build-N" for the version-checker; the human-readable
-      # label and filenames use the professional "LonghornNIL_vN" format.
       - name: Set app name
         shell: bash
         run: |
-          echo "APP_NAME=LonghornNeuralInterface_${{ runner.os }}_v1.${{ github.run_number }}" >> $GITHUB_ENV
+          echo "APP_NAME=LonghornNeuralInterface_${{ matrix.name }}_v1.${{ github.run_number }}" >> $GITHUB_ENV
 
       - name: Build Executable (Windows & Linux)
         if: runner.os != 'macOS'
@@ -107,8 +117,6 @@ jobs:
 
       # Notarization skipped -- no Apple Developer ID certificate.
       # macOS users: right-click > Open to bypass Gatekeeper warning.
-      # To re-enable: set MAC_CERTS_BASE64, MAC_CERTS_PASSWORD, APPLE_ID,
-      # APPLE_PASSWORD, APPLE_TEAM_ID secrets and uncomment signing steps.
 
       - name: Zip macOS App
         if: runner.os == 'macOS'
@@ -120,7 +128,7 @@ jobs:
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: executable-${{ matrix.os }}
+          name: executable-${{ matrix.name }}
           path: dist/*
           retention-days: 5
 
@@ -144,5 +152,10 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: "Longhorn Neural Interface Platform v1.${{ github.run_number }}"
           body: |
-            Download the appropriate build for your operating system below (Windows .exe, macOS .zip, or Linux executable).
+            Download the appropriate build for your operating system below.
+
+            **Windows:** `.exe` file -- run directly
+            **macOS (Apple Silicon M1/M2/M3):** `macOS-ARM` `.zip` -- extract and right-click > Open
+            **macOS (Intel):** `macOS-Intel` `.zip` -- extract and right-click > Open
+            **Linux:** executable file -- `chmod +x` and run
           files: artifacts/*
