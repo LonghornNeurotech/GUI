@@ -12,9 +12,9 @@ This milestone builds the complete offline-to-online motor imagery BCI pipeline 
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [x] **Phase 1: Filter Pipeline Foundation** - Stateful sequential filter chain (bandpass, notch) with real-time streaming integration and per-session persistence (completed 2026-03-11)
-- [ ] **Phase 1.5: GUI Visualization & UX Polish** - INSERTED: FFT range control, smooth realtime FFT/band power, dark mode contrast fixes, dual-stream XDF
-- [ ] **Phase 2: Signal Quality and Spatial Filters** - Per-channel quality indicators, CAR/Laplacian spatial filters, configurable C3/C4 channel mapping
+- [x] **Phase 1: Filter Pipeline Foundation** - Stateful sequential filter chain (bandpass, notch) with real-time streaming integration and per-session persistence (completed 2026-03-11)
+- [x] **Phase 1.5: GUI Visualization & UX Polish** - INSERTED: FFT range control, smooth realtime FFT/band power, dark mode contrast fixes, dual-stream XDF
+- [x] **Phase 2: Signal Quality and Spatial Filters** - Per-channel quality indicators, CAR/Laplacian spatial filters, configurable C3/C4 channel mapping
 - [ ] **Phase 3: Band Power and Control Signals** - Mu-rhythm band power extraction, LR/UD control signal computation with sliding REST-period baseline
 - [ ] **Phase 4: Transfer Function and 1D Motor Imagery Tasks** - Nonlinear transfer function, native PyQt6 1D LR and 1D UD task windows with XDF marker integration
 - [ ] **Phase 5: CSP Training, LDA Classifier, and Feedback Bar** - Supervised CSP spatial filter from labeled offline data, LDA decoder, real-time classification certainty bar
@@ -70,9 +70,13 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. Mu-rhythm (8-13 Hz) band power is computed live at C3 and C4 at a continuous decode rate during streaming
   2. An LR control signal (C4-C3 mu power difference) and UD control signal (C3+C4 mu power sum) are available as real-time scalar outputs
-  3. Baseline normalization draws only from REST-period samples in a sliding buffer — not a fixed session-start snapshot
+  3. Baseline normalization draws only from REST-period samples in a sliding buffer -- not a fixed session-start snapshot
   4. Control signal values are expressed in standard deviations from the sliding REST-period mean, and a Re-baseline button resets the buffer mid-session
-**Plans**: TBD
+**Plans:** 3 plans
+Plans:
+- [ ] 03-01-PLAN.md — TDD: BandPowerExtractor + RestBaselineTracker + ControlSignals in dsp/band_power.py
+- [ ] 03-02-PLAN.md — Wire band power + control signals into GUI.py with Control Signals UI
+- [ ] 03-03-PLAN.md — Push control signals to TaskWebBridge + end-to-end integration verification
 
 ### Phase 4: Transfer Function and 1D Motor Imagery Tasks
 **Goal**: Researchers can run complete 1D Left/Right and 1D Up/Down offline motor imagery sessions in a native PyQt6 task window, with a transfer function shaping the decoded control signal using subject-specific parameters
@@ -113,7 +117,7 @@ Plans:
 **Depends on**: Phase 6
 **Requirements**: ASYN-01, ASYN-02, ASYN-03
 **Success Criteria** (what must be TRUE):
-  1. Free-cursor mode presents no directional cues and no target prompts — the subject controls the 2D cursor position freely through imagery
+  1. Free-cursor mode presents no directional cues and no target prompts -- the subject controls the 2D cursor position freely through imagery
   2. Real-time 2D decoding runs at display rate using the trained CSP+LDA pipeline with no additional configuration required beyond loading saved weights
   3. The session records to XDF with continuous decoded cursor position as markers, using the same format as cued task recordings
 **Plans**: TBD
@@ -126,9 +130,9 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Filter Pipeline Foundation | 3/3 | Complete   | 2026-03-11 |
-| 1.5 GUI Visualization & UX Polish | 0/TBD | Not started | - |
-| 2. Signal Quality and Spatial Filters | 0/TBD | Not started | - |
-| 3. Band Power and Control Signals | 0/TBD | Not started | - |
+| 1.5 GUI Visualization & UX Polish | 4/4 | Complete | 2026-03-31 |
+| 2. Signal Quality and Spatial Filters | 3/3 | Complete | 2026-04-01 |
+| 3. Band Power and Control Signals | 0/3 | Planned | - |
 | 4. Transfer Function and 1D Motor Imagery Tasks | 0/TBD | Not started | - |
 | 5. CSP Training, LDA Classifier, and Feedback Bar | 0/TBD | Not started | - |
 | 6. 1D Up/Down Decoder and 2D Cursor Task | 0/TBD | Not started | - |
