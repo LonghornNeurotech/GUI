@@ -3164,12 +3164,21 @@ class SegmentViewer(QMainWindow):
                                 board.release_session()
                             except Exception:
                                 pass
-                QMessageBox.critical(
-                    self, "Connection Error",
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Connection Error")
+                msg.setText(
                     "Found a serial device but could not initialise it as "
-                    "Cyton+Daisy or plain Cyton.\n"
-                    "Check that the headset is powered on and the COM port is free."
+                    "Cyton+Daisy or plain Cyton.\n\n"
+                    "If this is not an EEG headset (e.g. ESP-32, Bluetooth dongle), "
+                    "try scanning for LSL streams instead."
                 )
+                lsl_btn = msg.addButton("Scan LSL Streams", QMessageBox.ButtonRole.AcceptRole)
+                msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+                msg.exec()
+                if msg.clickedButton() is lsl_btn:
+                    self._reset_connect_btn()
+                    self.scan_and_connect_lsl()
+                    return
                 self._reset_connect_btn()
                 return
 
