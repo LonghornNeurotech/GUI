@@ -1172,9 +1172,18 @@ class SegmentViewer(QMainWindow):
                      self.motor_imagery_task("2D")))
         self._mi_2d_action = mi_2d_action
 
+        mi_free_action = QAction("Free Cursor", self)
+        mi_free_action.setEnabled(False)  # disabled until both LR and UD weights loaded
+        mi_free_action.triggered.connect(
+            lambda: (setattr(self, '_active_task', "Free Cursor"),
+                     self.task_launcher_btn.setText("Free Cursor"),
+                     self.motor_imagery_task("FREE")))
+        self._mi_free_action = mi_free_action
+
         self._task_menu.addAction(mi_lr_action)
         self._task_menu.addAction(mi_ud_action)
         self._task_menu.addAction(mi_2d_action)
+        self._task_menu.addAction(mi_free_action)
         self._task_menu.addAction(prosthetic_action)
         self._task_menu.addAction(myo_action)
 
@@ -4628,10 +4637,11 @@ class SegmentViewer(QMainWindow):
         self.ud_readout.setText("--")
 
     def _update_2d_gate(self) -> None:
-        """Enable/disable 2D Cursor action based on both LR and UD weights."""
+        """Enable/disable 2D Cursor and Free Cursor actions based on both LR and UD weights."""
         has_lr = self._csp_filter is not None and self._lda_classifier is not None
         has_ud = self._csp_filter_ud is not None and self._lda_classifier_ud is not None
         self._mi_2d_action.setEnabled(has_lr and has_ud)
+        self._mi_free_action.setEnabled(has_lr and has_ud)
 
     # ------------------------------------------------------------------
     # CSP+LDA training slots
