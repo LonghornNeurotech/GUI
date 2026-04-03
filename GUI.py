@@ -883,6 +883,7 @@ class SegmentViewer(QMainWindow):
         self._marker_inf_lines = [] # currently displayed InfiniteLine objects
 
         # Signal processing parameters
+        self.stream_type = 'EEG'  # 'EEG' or 'EMG' -- set during connection
         self.lowcut = 5.0
         self.highcut = 35.0
         self.notch_freq = 60.0
@@ -3498,6 +3499,7 @@ class SegmentViewer(QMainWindow):
     def _finish_brainflow_connection(self):
         """Read metadata from BrainFlow and call _complete_connection."""
         self.headset_source = 'brainflow'
+        self.stream_type    = 'EEG'  # BrainFlow boards are always EEG
         self.eeg_channels  = BoardShim.get_eeg_channels(self.board_id)
         self.num_channels  = len(self.eeg_channels)
         self.sampling_rate = BoardShim.get_sampling_rate(self.board_id)
@@ -3508,48 +3510,50 @@ class SegmentViewer(QMainWindow):
         self._complete_connection()
 
     def scan_and_connect_lsl(self):
-        """Discover LSL EEG streams on the network and let the user pick one."""
+        """Discover LSL EEG and EMG streams on the network and let the user pick one."""
         if not LSL_AVAILABLE:
             QMessageBox.critical(
                 self, "Error",
-                "pylsl is not installed — cannot scan for LSL streams.\n"
+                "pylsl is not installed -- cannot scan for LSL streams.\n"
                 "Install with: pip install pylsl"
             )
             return
 
         self.connect_btn.setEnabled(False)
-        self.connect_btn.setText("Scanning LSL…")
+        self.connect_btn.setText("Scanning LSL...")
 
-        try:
-            streams = resolve_byprop('type', 'EEG', timeout=4.0)
-        except Exception as e:
-            QMessageBox.critical(self, "LSL Scan Error",
-                                 f"Failed to scan for LSL streams:\n{e}")
-            self._reset_connect_btn()
-            return
+        # Scan for both EEG and EMG stream types
+        streams = []
+        for stype in ('EEG', 'EMG'):
+            try:
+                found = resolve_byprop('type', stype, timeout=2.0)
+                streams.extend(found)
+            except Exception:
+                pass
 
         if not streams:
             QMessageBox.warning(
                 self, "No LSL Streams Found",
-                "No EEG LSL streams were found on the network.\n"
-                "Make sure the headset software is running and broadcasting LSL."
+                "No EEG or EMG LSL streams were found on the network.\n\n"
+                "For EEG: make sure the headset software is running and broadcasting LSL.\n"
+                "For EMG: run esp32_emg_lsl.py first to bridge the ESP-32 to LSL."
             )
             self._reset_connect_btn()
             return
 
         # Stream picker dialog
         dlg = QDialog(self)
-        dlg.setWindowTitle("Select LSL EEG Stream")
+        dlg.setWindowTitle("Select LSL Stream")
         dlg.setMinimumWidth(460)
         layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel("Available EEG streams:"))
+        layout.addWidget(QLabel("Available streams (EEG and EMG):"))
         combo = QComboBox()
         for s in streams:
             sr = s.nominal_srate()
             sr_str = f"{sr:.1f}" if sr > 0 else "irregular"
             combo.addItem(
-                f"{s.name()}  [{s.channel_count()} ch @ {sr_str} Hz]"
-                f"  — {s.hostname()}"
+                f"[{s.type()}] {s.name()}  [{s.channel_count()} ch @ {sr_str} Hz]"
+                f"  -- {s.hostname()}"
             )
         layout.addWidget(combo)
         btns = QDialogButtonBox(
@@ -3574,6 +3578,7 @@ class SegmentViewer(QMainWindow):
             self.board_id       = None
             self.eeg_channels   = None
             self.num_channels   = info.channel_count()
+            self.stream_type    = info.type().upper() if info.type() else 'EEG'
             sr = info.nominal_srate()
             self.sampling_rate  = int(sr) if sr > 0 else 250
 
@@ -3603,11 +3608,21 @@ class SegmentViewer(QMainWindow):
         self.calculate_filter_coefficients()
 
         # Build default filter pipeline stages if pipeline is empty
+        # Use stream-type-appropriate defaults (EEG vs EMG)
         if len(self.filter_pipeline) == 0:
-            self.filter_pipeline.add_bandpass(self.lowcut, self.highcut, self.sampling_rate)
-            self.filter_pipeline.add_notch(self.notch_freq, fs=self.sampling_rate)
-            self._refresh_filter_list_widget()
-            print(f"[Filter] Default pipeline: bandpass {self.lowcut}-{self.highcut} Hz + notch {self.notch_freq} Hz @ {self.sampling_rate} Hz")
+            if self.stream_type == 'EMG':
+                # EMG: wider bandpass (20-450 Hz) + notch, no mu-rhythm filters
+                emg_low, emg_high = 20.0, min(450.0, self.sampling_rate / 2 - 1)
+                self.filter_pipeline.add_bandpass(emg_low, emg_high, self.sampling_rate)
+                self.filter_pipeline.add_notch(self.notch_freq, fs=self.sampling_rate)
+                self._refresh_filter_list_widget()
+                print(f"[Filter] EMG default pipeline: bandpass {emg_low}-{emg_high} Hz + notch {self.notch_freq} Hz @ {self.sampling_rate} Hz")
+            else:
+                # EEG: standard bandpass (5-35 Hz) + notch
+                self.filter_pipeline.add_bandpass(self.lowcut, self.highcut, self.sampling_rate)
+                self.filter_pipeline.add_notch(self.notch_freq, fs=self.sampling_rate)
+                self._refresh_filter_list_widget()
+                print(f"[Filter] EEG default pipeline: bandpass {self.lowcut}-{self.highcut} Hz + notch {self.notch_freq} Hz @ {self.sampling_rate} Hz")
         self._load_filter_config()
         self._load_channel_config()
 
@@ -3617,7 +3632,7 @@ class SegmentViewer(QMainWindow):
         self.sampling_rate_spinbox.setEnabled(False)
 
         if self.headset_source == 'lsl_inlet':
-            status = (f"Connected via LSL: {self.num_channels} ch "
+            status = (f"Connected via LSL ({self.stream_type}): {self.num_channels} ch "
                       f"@ {self.sampling_rate} Hz")
         else:
             board_label = ""
@@ -3637,11 +3652,26 @@ class SegmentViewer(QMainWindow):
         self.connect_btn.clicked.connect(self.disconnect_headset)
         self.connect_btn.setEnabled(True)
 
+        # Update labels based on stream type
+        stream_label = self.stream_type
+        self.viz_tabs.setTabText(0, f"{stream_label} Data")
+        self.start_eeg_stream_btn.setText(f"Start {stream_label} Stream")
+        self.eeg_stream_status.setText(f"{stream_label} Stream: Inactive")
+
         self.start_eeg_stream_btn.setEnabled(True)
         self.start_marker_stream_btn.setEnabled(True)
         self.start_viz_btn.setEnabled(True)
         self.start_recording_btn.setEnabled(True)
-        self.task_launcher_btn.setEnabled(True)
+
+        # Motor imagery tasks and CSP training are EEG-only
+        is_eeg = self.stream_type == 'EEG'
+        self.task_launcher_btn.setEnabled(is_eeg)
+        if not is_eeg:
+            self.task_launcher_btn.setToolTip(
+                f"{stream_label} stream connected -- motor imagery tasks require EEG"
+            )
+        else:
+            self.task_launcher_btn.setToolTip("")
 
         self.setup_streaming_channels()
 
