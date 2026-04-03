@@ -132,7 +132,7 @@ Plans:
 **Plans:** 2 plans
 Plans:
 - [x] 07-01-PLAN.md -- FREE mode in app.js (no cues/targets, continuous cursor, position markers) + Free Cursor button in GUI
-- [ ] 07-02-PLAN.md -- Integration tests and human verification of complete FREE cursor mode
+- [x] 07-02-PLAN.md -- Integration tests and human verification of complete FREE cursor mode
 
 ## Progress
 
