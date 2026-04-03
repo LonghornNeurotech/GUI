@@ -115,7 +115,11 @@ Plans:
   2. A cursor moves in 2D in real-time, with the LR and UD axes driven by their respective independently trained decoders and transfer functions
   3. Four directional targets (top, bottom, left, right) are presented as cues; the cursor visibly responds to correct motor imagery
   4. Subject-specific R weighting factors for LR and UD axes are configurable independently
-**Plans**: TBD
+**Plans:** 3 plans
+Plans:
+- [ ] 06-01-PLAN.md -- UD decoder support: detect_axis, UD epochs, R (UD) spinbox, separate weight file
+- [ ] 06-02-PLAN.md -- 2D cursor task JS: cursor dot, four target squares, dual-axis movement
+- [ ] 06-03-PLAN.md -- GUI wiring: 2D Cursor button gated on both weights, dual CSP+LDA inference
 
 ### Phase 7: Asynchronous Free-Cursor Mode
 **Goal**: Researchers can run a cue-free 2D cursor session to evaluate real-world BCI performance, with continuous decoded position recorded to XDF
@@ -140,5 +144,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 3. Band Power and Control Signals | 0/3 | Planned | - |
 | 4. Transfer Function and 1D Motor Imagery Tasks | 0/4 | Planned | - |
 | 5. CSP Training, LDA Classifier, and Feedback Bar | 4/4 | Complete   | 2026-04-03 |
-| 6. 1D Up/Down Decoder and 2D Cursor Task | 0/TBD | Not started | - |
+| 6. 1D Up/Down Decoder and 2D Cursor Task | 0/3 | Planned | - |
 | 7. Asynchronous Free-Cursor Mode | 0/TBD | Not started | - |

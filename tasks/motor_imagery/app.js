@@ -26,14 +26,23 @@ const TASK_DURATION = 4000;   // 4 s motor imagery window
 // --- Mode parameter (LR or UD) ------------------------------------------------
 const params = new URLSearchParams(window.location.search);
 const MODE = (params.get("mode") || "LR").toUpperCase();
-const DIRECTIONS = MODE === "UD" ? ["UP", "DOWN"] : ["LEFT", "RIGHT"];
+const DIRECTIONS = MODE === "2D"
+    ? ["LEFT", "RIGHT", "UP", "DOWN"]
+    : MODE === "UD"
+        ? ["UP", "DOWN"]
+        : ["LEFT", "RIGHT"];
 
-// Update instruction screen text for UD mode
+// Update instruction screen text for UD / 2D mode
 if (MODE === "UD") {
     const dirEl = document.getElementById("guide-directions");
     if (dirEl) dirEl.innerHTML = '<span>STEP 3</span> <b>UP / DOWN:</b> Imagine the movement as the arrow appears. <b>Do NOT blink.</b>';
     const patEl = document.getElementById("guide-pattern");
     if (patEl) patEl.innerHTML = '<span>STEP 4</span> Pattern: <b>REST \u2192 UP or DOWN \u2192 REST \u2192 UP or DOWN \u2192 \u2026</b>';
+} else if (MODE === "2D") {
+    const dirEl = document.getElementById("guide-directions");
+    if (dirEl) dirEl.innerHTML = '<span>STEP 3</span> <b>2D CURSOR:</b> Imagine movement toward the <b>highlighted target</b>. <b>Do NOT blink.</b>';
+    const patEl = document.getElementById("guide-pattern");
+    if (patEl) patEl.innerHTML = '<span>STEP 4</span> Pattern: <b>REST \u2192 L / R / U / D target \u2192 REST \u2192 \u2026</b> (4 per cycle)';
 }
 
 // Each cycle contains one LEFT and one RIGHT in random order.
@@ -261,6 +270,8 @@ function update() {
             previousState = state;
             state = nextTask;
             cueSide = nextTask;
+            // Reset cursor to center at start of each cue (2D mode)
+            if (MODE === "2D") { cursorX = 0.5; cursorY = 0.5; }
             sendMarker("REST", nextTask);
         } else {
             // task → REST (or end session)
@@ -308,6 +319,78 @@ function drawProgressiveLetter(x, y, char, isActive, color, progress) {
         ctx.strokeText(char, 0, 0);
     }
     ctx.restore();
+}
+
+// --- 2D cursor state (only active in 2D mode) --------------------------------
+let cursorX = 0.5;  // normalized [0, 1], 0.5 = center
+let cursorY = 0.5;
+const CURSOR_RADIUS = 12;
+const CURSOR_SPEED = 0.008;  // per-frame movement scale for tf values
+const TARGET_SIZE = 60;      // target square side length in px
+
+const TARGET_COLORS = {
+    LEFT:  "#00f2ff",
+    RIGHT: "#7000ff",
+    UP:    "#00ff88",
+    DOWN:  "#ff4444"
+};
+
+function drawTargets(cx, cy, activeDirection) {
+    const w = canvas.width;
+    const h = canvas.height;
+    const half = TARGET_SIZE / 2;
+
+    const positions = {
+        LEFT:  { x: half + 10,          y: cy },
+        RIGHT: { x: w - half - 10,      y: cy },
+        UP:    { x: cx,                  y: half + 10 },
+        DOWN:  { x: cx,                  y: h - half - 10 }
+    };
+
+    for (const dir of ["LEFT", "RIGHT", "UP", "DOWN"]) {
+        const pos = positions[dir];
+        const color = TARGET_COLORS[dir];
+        const isActive = (dir === activeDirection);
+
+        ctx.save();
+        ctx.globalAlpha = isActive ? 1.0 : 0.3;
+        if (isActive) {
+            ctx.shadowBlur = 25;
+            ctx.shadowColor = color;
+        }
+        ctx.fillStyle = color;
+        ctx.fillRect(pos.x - half, pos.y - half, TARGET_SIZE, TARGET_SIZE);
+        ctx.restore();
+    }
+}
+
+function drawCursor() {
+    const px = cursorX * canvas.width;
+    const py = cursorY * canvas.height;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(px, py, CURSOR_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.shadowBlur = 15;
+    ctx.shadowColor = "rgba(255, 255, 255, 0.6)";
+    ctx.fill();
+    ctx.restore();
+}
+
+function updateCursorPosition() {
+    const signals = window._lastControlSignals;
+    if (!signals || !signals.baseline_ready) return;
+
+    const tfLr = signals.tf_lr || 0;
+    const tfUd = signals.tf_ud || 0;
+
+    cursorX += tfLr * CURSOR_SPEED;  // positive = rightward
+    cursorY -= tfUd * CURSOR_SPEED;  // positive = upward (canvas Y inverted)
+
+    // Clamp to [0.05, 0.95] so cursor stays within target area
+    cursorX = Math.max(0.05, Math.min(0.95, cursorX));
+    cursorY = Math.max(0.05, Math.min(0.95, cursorY));
 }
 
 // --- Arrow cue rendering -----------------------------------------------------
@@ -372,10 +455,17 @@ function draw() {
         ctx.stroke();
     }
 
-    // ---- Arrow cue (only during task states, not REST) ----
-    if (state !== "REST") {
+    // ---- Arrow cue (1D modes only, not REST, not 2D) ----
+    if (state !== "REST" && MODE !== "2D") {
         const arrowColor = ARROW_COLORS[state] || "#ffffff";
         drawArrow(cx, cy, state, arrowColor);
+    }
+
+    // ---- 2D mode: targets + cursor ----
+    if (MODE === "2D") {
+        drawTargets(cx, cy, state === "REST" ? null : state);
+        updateCursorPosition();
+        drawCursor();
     }
 
     // ---- Instruction text ----
@@ -384,6 +474,10 @@ function draw() {
     if (state === "REST") {
         ctx.fillStyle = "#00f2ff";
         ctx.fillText("BLINK NOW  /  CLEAR MIND", cx, cy - 180);
+    } else if (MODE === "2D") {
+        const dirColor = TARGET_COLORS[state] || "#ffffff";
+        ctx.fillStyle = dirColor;
+        ctx.fillText(`${state} -- DO NOT BLINK`, cx, cy - 180);
     } else if (state === "LEFT") {
         ctx.fillStyle = "#00f2ff";
         ctx.fillText("THINK LEFT MOVEMENT -- DO NOT BLINK", cx, cy - 180);
@@ -402,7 +496,7 @@ function draw() {
     ctx.fillStyle = "#222";
     ctx.font = "700 22px 'Space Grotesk'";
     ctx.textAlign = "center";
-    const currentCycle = Math.floor(rounds / 2) + 1;
+    const currentCycle = Math.floor(rounds / DIRECTIONS.length) + 1;
     ctx.fillText(`CYCLE ${currentCycle} / ${numCycles}  —  TRIAL ${rounds + 1} / ${totalTrials}`, cx, canvas.height - 50);
 }
 
