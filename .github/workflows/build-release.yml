@@ -83,10 +83,8 @@ jobs:
 
       - name: Build .app Bundle (macOS)
         if: runner.os == 'macOS'
-        env:
-          ARCHFLAGS: "-arch x86_64 -arch arm64"
         run: |
-          pyinstaller --windowed --target-architecture universal2 \
+          pyinstaller --windowed \
             --collect-all mne --collect-all brainflow --collect-all pylsl \
             --hidden-import=PyQt6.QtOpenGL \
             --hidden-import=PyQt6.QtOpenGLWidgets \
