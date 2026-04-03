@@ -102,6 +102,9 @@ from dsp.filter_pipeline import FilterPipeline, SpatialFilterStage
 # Signal quality monitor
 from dsp.quality import SignalQualityMonitor
 
+# Band power extraction and control signals
+from dsp.band_power import BandPowerExtractor, RestBaselineTracker, ControlSignals
+
 # Auto-updater
 from updater import prompt_update_if_available, check_for_updates, apply_update
 from version import CURRENT_VERSION
@@ -223,6 +226,16 @@ class TaskWebBridge(QObject):
             self.main_window.xdf_recorder.push_marker(ts, marker_val)
         else:
             self.main_window._pending_markers.append((ts, marker_val))
+
+        # Notify baseline tracker of task state transitions
+        try:
+            data = json.loads(marker_val)
+            if isinstance(data, dict):
+                start = data.get("start", "")
+                if start:
+                    self.main_window._baseline_tracker.set_state(start)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
 
     @pyqtSlot()
     def pick_save_dir(self):
@@ -809,6 +822,11 @@ class SegmentViewer(QMainWindow):
         self._quality_timer.setInterval(500)
         self._quality_timer.timeout.connect(self._update_quality)
 
+        # Band power extraction and control signals
+        self._band_power_extractor = BandPowerExtractor(fs=self.sampling_rate)
+        self._baseline_tracker = RestBaselineTracker(max_samples=470, min_baseline=10)
+        self._last_control_signals: ControlSignals | None = None
+
         # Channel mapping (C3 / C4 for motor imagery)
         self._c3_channel: int = 0
         self._c4_channel: int = 1
@@ -1279,6 +1297,34 @@ class SegmentViewer(QMainWindow):
         self.mapping_group.setLayout(mapping_layout)
         self.mapping_group.setEnabled(False)
         left_panel_layout.addWidget(self.mapping_group)
+
+        # --- Control Signals UI ---
+        self.control_signals_group = QGroupBox("Control Signals")
+        cs_layout = QVBoxLayout()
+        cs_layout.setSpacing(4)
+        cs_layout.setContentsMargins(4, 8, 4, 4)
+
+        lr_row = QHBoxLayout()
+        lr_row.addWidget(QLabel("LR:"))
+        self.lr_readout = QLabel("--")
+        self.lr_readout.setStyleSheet("font-weight: bold; font-size: 14px;")
+        lr_row.addWidget(self.lr_readout)
+        cs_layout.addLayout(lr_row)
+
+        ud_row = QHBoxLayout()
+        ud_row.addWidget(QLabel("UD:"))
+        self.ud_readout = QLabel("--")
+        self.ud_readout.setStyleSheet("font-weight: bold; font-size: 14px;")
+        ud_row.addWidget(self.ud_readout)
+        cs_layout.addLayout(ud_row)
+
+        self.rebaseline_btn = QPushButton("Re-baseline")
+        self.rebaseline_btn.clicked.connect(self._on_rebaseline)
+        cs_layout.addWidget(self.rebaseline_btn)
+
+        self.control_signals_group.setLayout(cs_layout)
+        self.control_signals_group.setEnabled(False)
+        left_panel_layout.addWidget(self.control_signals_group)
 
         left_panel_layout.addStretch()
         left_panel_scroll.setWidget(left_panel)
@@ -3827,6 +3873,20 @@ class SegmentViewer(QMainWindow):
             if self.spatial_filter is not None and self.spatial_filter.enabled:
                 filtered_data = self.spatial_filter.process(filtered_data)
 
+            # --- Band power extraction and control signal computation ---
+            c3_idx = self.c3_combo.currentIndex() - 1  # -1 because index 0 is "Select..."
+            c4_idx = self.c4_combo.currentIndex() - 1
+            if c3_idx >= 0 and c4_idx >= 0 and c3_idx < filtered_data.shape[0] and c4_idx < filtered_data.shape[0]:
+                mu_result = self._band_power_extractor.update(
+                    filtered_data[c3_idx], filtered_data[c4_idx]
+                )
+                if mu_result is not None:
+                    mu_c3, mu_c4 = mu_result
+                    self._baseline_tracker.accumulate(mu_c3, mu_c4)
+                    cs = self._baseline_tracker.compute_control_signals(mu_c3, mu_c4)
+                    self._last_control_signals = cs
+                    self._update_control_signal_readouts(cs)
+
             # Push filtered data to XDF recorder (alongside the raw stream).
             # Uses filter-only output -- no display magnitude scaling.
             if self.xdf_recorder is not None and len(self.filter_pipeline) > 0:
@@ -4261,6 +4321,26 @@ class SegmentViewer(QMainWindow):
             pass
 
     # ------------------------------------------------------------------
+    # Control signal readouts
+    # ------------------------------------------------------------------
+
+    def _update_control_signal_readouts(self, cs: ControlSignals) -> None:
+        """Update the LR/UD readout labels from control signal values."""
+        if cs.baseline_ready:
+            self.lr_readout.setText(f"{cs.lr:+.2f} SD")
+            self.ud_readout.setText(f"{cs.ud:+.2f} SD")
+        else:
+            self.lr_readout.setText("Calibrating...")
+            self.ud_readout.setText("Calibrating...")
+
+    def _on_rebaseline(self) -> None:
+        """Re-baseline button handler: clear REST buffer entirely."""
+        self._baseline_tracker.reset()
+        self._last_control_signals = None
+        self.lr_readout.setText("--")
+        self.ud_readout.setText("--")
+
+    # ------------------------------------------------------------------
     # Spatial filter slots
     # ------------------------------------------------------------------
 
@@ -4330,11 +4410,17 @@ class SegmentViewer(QMainWindow):
         self._c3_channel = self.c3_combo.currentData() or 0
         self._check_mapping_conflict()
         self._save_channel_config()
+        self.control_signals_group.setEnabled(
+            self.c3_combo.currentIndex() > 0 and self.c4_combo.currentIndex() > 0
+        )
 
     def _on_c4_changed(self, index: int) -> None:
         self._c4_channel = self.c4_combo.currentData() or 0
         self._check_mapping_conflict()
         self._save_channel_config()
+        self.control_signals_group.setEnabled(
+            self.c3_combo.currentIndex() > 0 and self.c4_combo.currentIndex() > 0
+        )
 
     def _check_mapping_conflict(self) -> None:
         """Show warning when C3 and C4 are mapped to the same channel."""
