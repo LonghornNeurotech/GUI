@@ -1048,11 +1048,16 @@ class SegmentViewer(QMainWindow):
             }
         """)
 
-        mi_action = QAction("Motor Imagery Task", self)
-        mi_action.triggered.connect(
-            lambda: (setattr(self, '_active_task', "Motor Imagery Task"),
-                     self.task_launcher_btn.setText("Motor Imagery Task"),
-                     self.motor_imagery_task()))
+        mi_lr_action = QAction("1D Left/Right", self)
+        mi_lr_action.triggered.connect(
+            lambda: (setattr(self, '_active_task', "1D Left/Right"),
+                     self.task_launcher_btn.setText("1D Left/Right"),
+                     self.motor_imagery_task("LR")))
+        mi_ud_action = QAction("1D Up/Down", self)
+        mi_ud_action.triggered.connect(
+            lambda: (setattr(self, '_active_task', "1D Up/Down"),
+                     self.task_launcher_btn.setText("1D Up/Down"),
+                     self.motor_imagery_task("UD")))
         prosthetic_action = QAction("Prosthetic Control", self)
         prosthetic_action.triggered.connect(
             lambda: (setattr(self, '_active_task', "Prosthetic Control"),
@@ -1063,15 +1068,16 @@ class SegmentViewer(QMainWindow):
             lambda: (setattr(self, '_active_task', "Myo Armband"),
                      self.task_launcher_btn.setText("Myo Armband"),
                      self.launch_myo()))
-        self._task_menu.addAction(mi_action)
+        self._task_menu.addAction(mi_lr_action)
+        self._task_menu.addAction(mi_ud_action)
         self._task_menu.addAction(prosthetic_action)
         self._task_menu.addAction(myo_action)
 
-        self._active_task = "Motor Imagery Task"
+        self._active_task = "1D Left/Right"
         self.task_launcher_btn = QToolButton()
         self.task_launcher_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.task_launcher_btn.setMenu(self._task_menu)
-        self.task_launcher_btn.setText("Motor Imagery Task")
+        self.task_launcher_btn.setText("1D Left/Right")
         self.task_launcher_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.task_launcher_btn.setEnabled(True)
         self.task_launcher_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -4770,7 +4776,7 @@ class SegmentViewer(QMainWindow):
         # Lock Y-axis to stable max with 10% headroom
         self.band_power_plot_widget.setYRange(0, self.band_power_y_max * 1.1)
 
-    def motor_imagery_task(self):
+    def motor_imagery_task(self, mode: str = "LR"):
         # Parentless window so QWebEngineView's GPU compositor does not
         # interfere with pyqtgraph's OpenGL context in the main window.
         self.task_window = QMainWindow()
@@ -4790,9 +4796,13 @@ class SegmentViewer(QMainWindow):
         # Pre-fill form fields once the page is loaded
         self.web_view.loadFinished.connect(self._prefill_task_form)
 
-        # Load motor imagery task HTML
+        # Load motor imagery task HTML with mode query parameter
         html_path = resource_path(os.path.join("tasks", "motor_imagery", "index.html"))
-        self.web_view.setUrl(QUrl.fromLocalFile(html_path))
+        url = QUrl.fromLocalFile(html_path)
+        query = QUrlQuery()
+        query.addQueryItem("mode", mode)
+        url.setQuery(query)
+        self.web_view.setUrl(url)
 
         self.task_window.show()
 
