@@ -29,7 +29,7 @@ import json
 from datetime import datetime
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebChannel import QWebChannel
-from PyQt6.QtCore import QUrl, pyqtSlot, QObject
+from PyQt6.QtCore import QUrl, QUrlQuery, pyqtSlot, QObject
 
 
 def resource_path(relative_path):
@@ -104,6 +104,7 @@ from dsp.quality import SignalQualityMonitor
 
 # Band power extraction and control signals
 from dsp.band_power import BandPowerExtractor, RestBaselineTracker, ControlSignals
+from dsp.transfer_function import apply_transfer_function
 
 # Auto-updater
 from updater import prompt_update_if_available, check_for_updates, apply_update
@@ -1321,6 +1322,16 @@ class SegmentViewer(QMainWindow):
         self.rebaseline_btn = QPushButton("Re-baseline")
         self.rebaseline_btn.clicked.connect(self._on_rebaseline)
         cs_layout.addWidget(self.rebaseline_btn)
+
+        r_row = QHBoxLayout()
+        r_row.addWidget(QLabel("R Factor:"))
+        self.r_factor_spinbox = QDoubleSpinBox()
+        self.r_factor_spinbox.setRange(0.1, 10.0)
+        self.r_factor_spinbox.setValue(1.0)
+        self.r_factor_spinbox.setSingleStep(0.1)
+        self.r_factor_spinbox.setDecimals(2)
+        r_row.addWidget(self.r_factor_spinbox)
+        cs_layout.addLayout(r_row)
 
         self.control_signals_group.setLayout(cs_layout)
         self.control_signals_group.setEnabled(False)
@@ -4337,9 +4348,16 @@ class SegmentViewer(QMainWindow):
         cs = self._last_control_signals
         if cs is None:
             return
+        r = self.r_factor_spinbox.value()
+        tf_lr = apply_transfer_function(cs.lr, r)
+        tf_ud = apply_transfer_function(cs.ud, r)
+        self.lr_readout.setText(f"{tf_lr:+.3f}")
+        self.ud_readout.setText(f"{tf_ud:+.3f}")
         payload = {
             "lr": round(cs.lr, 4),
             "ud": round(cs.ud, 4),
+            "tf_lr": round(tf_lr, 4),
+            "tf_ud": round(tf_ud, 4),
             "mu_c3": round(cs.mu_c3, 6),
             "mu_c4": round(cs.mu_c4, 6),
             "baseline_ready": cs.baseline_ready,
