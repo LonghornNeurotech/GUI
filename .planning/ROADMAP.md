@@ -17,7 +17,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Signal Quality and Spatial Filters** - Per-channel quality indicators, CAR/Laplacian spatial filters, configurable C3/C4 channel mapping
 - [ ] **Phase 3: Band Power and Control Signals** - Mu-rhythm band power extraction, LR/UD control signal computation with sliding REST-period baseline
 - [ ] **Phase 4: Transfer Function and 1D Motor Imagery Tasks** - Nonlinear transfer function, native PyQt6 1D LR and 1D UD task windows with XDF marker integration
-- [ ] **Phase 5: CSP Training, LDA Classifier, and Feedback Bar** - Supervised CSP spatial filter from labeled offline data, LDA decoder, real-time classification certainty bar
+- [x] **Phase 5: CSP Training, LDA Classifier, and Feedback Bar** - Supervised CSP spatial filter from labeled offline data, LDA decoder, real-time classification certainty bar (completed 2026-04-03)
 - [ ] **Phase 6: 1D Up/Down Decoder and 2D Cursor Task** - UD axis CSP/LDA, combined 2D cursor task with target presentation and progression gating
 - [ ] **Phase 7: Asynchronous Free-Cursor Mode** - Cue-free 2D decoding for real-world BCI performance testing with full XDF recording
 
@@ -139,6 +139,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 2. Signal Quality and Spatial Filters | 3/3 | Complete | 2026-04-01 |
 | 3. Band Power and Control Signals | 0/3 | Planned | - |
 | 4. Transfer Function and 1D Motor Imagery Tasks | 0/4 | Planned | - |
-| 5. CSP Training, LDA Classifier, and Feedback Bar | 0/TBD | Not started | - |
+| 5. CSP Training, LDA Classifier, and Feedback Bar | 4/4 | Complete   | 2026-04-03 |
 | 6. 1D Up/Down Decoder and 2D Cursor Task | 0/TBD | Not started | - |
 | 7. Asynchronous Free-Cursor Mode | 0/TBD | Not started | - |
