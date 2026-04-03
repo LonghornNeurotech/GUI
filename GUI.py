@@ -21,7 +21,10 @@ from PyQt6.QtWidgets import (
     QInputDialog, QToolButton, QSizePolicy, QProgressBar, QGridLayout, QSpacerItem, QFrame
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, QThread, pyqtSignal
-from PyQt6.QtGui import QPalette, QColor, QKeySequence, QShortcut, QAction, QIcon, QPixmap, QDesktopServices
+from PyQt6.QtGui import (
+    QPalette, QColor, QKeySequence, QShortcut, QAction, QIcon, QPixmap,
+    QDesktopServices, QPainter, QLinearGradient, QPen,
+)
 import platform
 import time
 import struct
@@ -732,6 +735,50 @@ class TrainWorker(QThread):
             self.finished.emit(csp, lda)
         except Exception as e:
             self.error.emit(str(e))
+
+
+class FeedbackBar(QWidget):
+    """Horizontal certainty bar: left=LEFT (blue), center=neutral (gray), right=RIGHT (red)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._value: float = 0.0  # range [-1, +1]
+        self.setFixedHeight(30)
+        self.setVisible(False)  # hidden until weights loaded + streaming
+
+    def set_value(self, v: float) -> None:
+        """Set the certainty value and trigger a repaint."""
+        self._value = max(-1.0, min(1.0, v))
+        self.update()
+
+    def paintEvent(self, event: object) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Background gradient: blue -> gray -> red
+        grad = QLinearGradient(0, 0, w, 0)
+        grad.setColorAt(0.0, QColor(70, 130, 200))   # blue (LEFT)
+        grad.setColorAt(0.5, QColor(160, 160, 160))   # gray (neutral)
+        grad.setColorAt(1.0, QColor(200, 70, 70))     # red (RIGHT)
+        painter.fillRect(0, 0, w, h, grad)
+
+        # Indicator line at certainty position
+        x = int((self._value + 1.0) / 2.0 * w)
+        pen = QPen(QColor(255, 255, 255), 3)
+        painter.setPen(pen)
+        painter.drawLine(x, 0, x, h)
+
+        # Labels at edges
+        painter.setPen(QColor(255, 255, 255))
+        font = painter.font()
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(8, h - 8, "LEFT")
+        painter.drawText(w - 48, h - 8, "RIGHT")
+
+        painter.end()
 
 
 class SegmentViewer(QMainWindow):
@@ -1698,7 +1745,11 @@ class SegmentViewer(QMainWindow):
         self.viz_tabs.addTab(band_power_tab, "Band Power")
 
         self.main_layout.addWidget(self.viz_tabs, stretch=1)
-        
+
+        # Feedback bar for real-time CSP+LDA classification certainty
+        self._feedback_bar = FeedbackBar()
+        self.main_layout.addWidget(self._feedback_bar)
+
         # Create initial "no file" message
         self.no_file_label = QLabel("No file loaded\n\nClick 'Load File' to begin")
         self.no_file_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3915,6 +3966,10 @@ class SegmentViewer(QMainWindow):
             self.file_mode_radio.setEnabled(False)
             self.stream_mode_radio.setEnabled(False)
 
+            # Show feedback bar if CSP+LDA weights are loaded
+            if self._csp_filter is not None and self._lda_classifier is not None:
+                self._feedback_bar.setVisible(True)
+
         else:
             # Stop streaming visualization
             # Keep graphs visible - they will be cleared when new visualization starts
@@ -3924,6 +3979,9 @@ class SegmentViewer(QMainWindow):
             self.start_viz_btn.setStyleSheet("")
             self.play_pause_btn.setText("Start Streaming")
             self.file_loaded = False
+
+            # Hide feedback bar when not streaming
+            self._feedback_bar.setVisible(False)
 
             # Re-enable mode switching
             self.file_mode_radio.setEnabled(True)
@@ -4014,6 +4072,14 @@ class SegmentViewer(QMainWindow):
             if self.spatial_filter is not None and self.spatial_filter.enabled:
                 filtered_data = self.spatial_filter.process(filtered_data)
 
+            # --- CSP+LDA real-time inference for feedback bar ---
+            if self._csp_filter is not None and self._lda_classifier is not None:
+                csp_features = self._csp_filter.transform(filtered_data)
+                certainty = self._lda_classifier.predict_certainty(csp_features)
+                r = self.r_factor_spinbox.value()
+                shaped_certainty = apply_transfer_function(certainty, r)
+                self._feedback_bar.set_value(shaped_certainty)
+
             # --- Band power extraction and control signal computation ---
             c3_idx = self.c3_combo.currentIndex() - 1  # -1 because index 0 is "Select..."
             c4_idx = self.c4_combo.currentIndex() - 1
@@ -4087,6 +4153,7 @@ class SegmentViewer(QMainWindow):
             if self.headset_source == 'lsl_inlet' and self.streaming_active:
                 self.stream_timer.stop()
                 self.streaming_active = False
+                self._feedback_bar.setVisible(False)
                 self.start_viz_btn.setText("Start Visualization")
                 self.start_viz_btn.setStyleSheet("")
                 self.play_pause_btn.setText("Start Streaming")
@@ -4542,6 +4609,10 @@ class SegmentViewer(QMainWindow):
         self._train_progress.setVisible(False)
         self._train_btn.setEnabled(True)
 
+        # Show feedback bar if currently streaming
+        if self.streaming_active:
+            self._feedback_bar.setVisible(True)
+
         # Auto-save weights to XDF directory
         if self._xdf_dir:
             default_path = os.path.join(self._xdf_dir, "csp_lda_weights.json")
@@ -4572,6 +4643,10 @@ class SegmentViewer(QMainWindow):
             self._save_weights_btn.setEnabled(True)
             self._weights_path_label.setText(path)
             self._train_status.setText("Weights loaded successfully")
+
+            # Show feedback bar if currently streaming
+            if self.streaming_active:
+                self._feedback_bar.setVisible(True)
         except Exception as e:
             QMessageBox.warning(self, "Load Error", f"Failed to load weights:\n{e}")
 
