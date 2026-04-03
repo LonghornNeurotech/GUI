@@ -119,7 +119,7 @@ Plans:
 Plans:
 - [x] 06-01-PLAN.md -- UD decoder support: detect_axis, UD epochs, R (UD) spinbox, separate weight file
 - [x] 06-02-PLAN.md -- 2D cursor task JS: cursor dot, four target squares, dual-axis movement
-- [ ] 06-03-PLAN.md -- GUI wiring: 2D Cursor button gated on both weights, dual CSP+LDA inference
+- [x] 06-03-PLAN.md -- GUI wiring: 2D Cursor button gated on both weights, dual CSP+LDA inference
 
 ### Phase 7: Asynchronous Free-Cursor Mode
 **Goal**: Researchers can run a cue-free 2D cursor session to evaluate real-world BCI performance, with continuous decoded position recorded to XDF
