@@ -617,6 +617,71 @@ class QualityAxisItem(pg.AxisItem):
 
 
 # ---------------------------------------------------------------------------
+# Unicorn Hybrid EEG -- gtec-ble native BLE connection
+# ---------------------------------------------------------------------------
+# Uses g.tec's gtec-ble library (libgtecble.dylib) for native macOS BLE
+# connection to the Unicorn Hybrid Black.  Data arrives via a callback at
+# 250 Hz and is buffered for the GUI timer to drain.
+
+UNICORN_CHANNEL_NAMES: list[str] = [
+    'CP4', 'FC5', 'CP3', 'Fz', 'Pz', 'Cz', '', 'Oz',
+]
+UNICORN_SAMPLING_RATE: int = 250
+UNICORN_NUM_EEG_CHANNELS: int = 8
+
+try:
+    from gtec_ble import Amplifier as _GtecAmplifier
+    from gtec_ble.lib.gtec_ble_wrapper import GtecBLEWrapper as _GtecBLEWrapper
+    import uuid as _uuid
+    import hashlib as _hashlib
+    # Auto-register using machine MAC address
+    _mac = _uuid.getnode()
+    _key = _hashlib.sha256(f'{_mac:012x}'.encode()).hexdigest()
+    _GtecBLEWrapper._key = _key
+    GTEC_BLE_AVAILABLE = True
+except ImportError:
+    GTEC_BLE_AVAILABLE = False
+
+
+class UnicornBLEReader:
+    """Wraps GtecBLEWrapper with a thread-safe sample buffer.
+
+    The gtec-ble library calls our data callback from its own thread at
+    250 Hz.  We accumulate samples and let the GUI timer drain them.
+    """
+
+    def __init__(self, wrapper: '_GtecBLEWrapper'):
+        import threading
+        self._wrapper = wrapper
+        self._lock = threading.Lock()
+        self._buffer: list[np.ndarray] = []
+        self._wrapper.set_data_callback(self._on_data)
+
+    def _on_data(self, data: np.ndarray) -> None:
+        # data is (N,) float32 with all channels; take first 8 (EEG)
+        eeg = data[:UNICORN_NUM_EEG_CHANNELS].astype(np.float64)
+        with self._lock:
+            self._buffer.append(eeg)
+
+    def drain(self) -> np.ndarray | None:
+        """Return buffered EEG samples as (8, N) array, or None."""
+        with self._lock:
+            if not self._buffer:
+                return None
+            chunk = self._buffer
+            self._buffer = []
+        return np.column_stack(chunk)
+
+    def start(self) -> None:
+        self._wrapper.start()
+
+    def stop(self) -> None:
+        try:
+            self._wrapper.stop()
+        except Exception:
+            pass
+
+# ---------------------------------------------------------------------------
 # Laplacian neighbour configuration dialog
 # ---------------------------------------------------------------------------
 
@@ -3429,20 +3494,27 @@ class SegmentViewer(QMainWindow):
                 self._reset_connect_btn()
                 return
 
-        # ── No serial device — offer LSL scan or synthetic ─────────────────────
+        # ── No serial device — offer Unicorn, LSL scan, or synthetic ─────────
         msg = QMessageBox(self)
         msg.setWindowTitle("No Serial Device Found")
         msg.setText(
             "No serial EEG device was detected.\n\n"
+            "• Unicorn Hybrid — g.tec Unicorn EEG (Bluetooth)\n\n"
             "• Scan LSL Streams — connect to any LSL EEG source\n"
             "  (Neurable, OpenBCI GUI, BrainVision, etc.)\n\n"
             "• Synthetic Board — simulated data for testing"
         )
-        lsl_btn   = msg.addButton("Scan LSL Streams",  QMessageBox.ButtonRole.AcceptRole)
-        synth_btn = msg.addButton("Synthetic Board",   QMessageBox.ButtonRole.AcceptRole)
+        unicorn_btn = msg.addButton("Unicorn Hybrid", QMessageBox.ButtonRole.AcceptRole)
+        lsl_btn     = msg.addButton("Scan LSL Streams", QMessageBox.ButtonRole.AcceptRole)
+        synth_btn   = msg.addButton("Synthetic Board",  QMessageBox.ButtonRole.AcceptRole)
         msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
         msg.exec()
         clicked = msg.clickedButton()
+
+        if clicked is unicorn_btn:
+            self._reset_connect_btn()
+            self._connect_unicorn()
+            return
 
         if clicked is lsl_btn:
             self._reset_connect_btn()
@@ -3476,6 +3548,98 @@ class SegmentViewer(QMainWindow):
         self._reset_connect_btn()
 
     # ── connection helpers ─────────────────────────────────────────────────────
+
+    def _connect_unicorn(self) -> None:
+        """Connect to a g.tec Unicorn Hybrid EEG via gtec-ble (native BLE)."""
+        if not GTEC_BLE_AVAILABLE:
+            QMessageBox.critical(
+                self, "Error",
+                "gtec-ble is not installed -- cannot connect to Unicorn.\n"
+                "Install with: pip install gpype"
+            )
+            return
+
+        self.connect_btn.setEnabled(False)
+        self.connect_btn.setText("Scanning for Unicorn...")
+        QApplication.processEvents()
+
+        # Use bleak for reliable BLE scanning, then pass the serial to gtec-ble
+        chosen_serial: str | None = None
+        try:
+            import asyncio
+            from bleak import BleakScanner
+
+            async def _scan() -> list[str]:
+                devices = await BleakScanner.discover(
+                    timeout=10.0, return_adv=True,
+                )
+                serials: list[str] = []
+                for _addr, (dev, _adv) in devices.items():
+                    name = dev.name or ''
+                    # Unicorn devices advertise as U8-* or UN-*
+                    if name.startswith('U8-') or name.startswith('UN-'):
+                        serials.append(name)
+                return serials
+
+            serials = asyncio.run(_scan())
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Scan Error",
+                f"BLE scan failed:\n{e}\n\n"
+                "Make sure Bluetooth is enabled."
+            )
+            self._reset_connect_btn()
+            return
+
+        if not serials:
+            # Fallback: let the user type the serial manually
+            text, ok = QInputDialog.getText(
+                self, "Unicorn Serial",
+                "No Unicorn found via BLE scan.\n\n"
+                "Enter the device serial (e.g. U8-2025.10.18):",
+            )
+            if not ok or not text.strip():
+                self._reset_connect_btn()
+                return
+            chosen_serial = text.strip()
+        elif len(serials) == 1:
+            chosen_serial = serials[0]
+        else:
+            item, ok = QInputDialog.getItem(
+                self, "Select Unicorn",
+                "Multiple Unicorn devices found:",
+                serials, 0, False,
+            )
+            if not ok:
+                self._reset_connect_btn()
+                return
+            chosen_serial = item
+
+        self.connect_btn.setText("Connecting Unicorn...")
+        QApplication.processEvents()
+
+        try:
+            wrapper = _GtecBLEWrapper(chosen_serial)
+            reader = UnicornBLEReader(wrapper)
+            reader.start()
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Connection Error",
+                f"Failed to connect to Unicorn ({chosen_serial}):\n{e}\n\n"
+                "Make sure the headset is powered on."
+            )
+            self._reset_connect_btn()
+            return
+
+        self._unicorn_reader = reader
+        self.headset_source = 'unicorn_serial'
+        self.stream_type = 'EEG'
+        self.board_id = None
+        self.num_channels = UNICORN_NUM_EEG_CHANNELS
+        self.sampling_rate = UNICORN_SAMPLING_RATE
+        self.channel_names = list(UNICORN_CHANNEL_NAMES)
+        self.eeg_channels = list(range(UNICORN_NUM_EEG_CHANNELS))
+        self._complete_connection()
 
     def _show_about_dialog(self):
         dlg = QDialog(self)
@@ -3634,6 +3798,9 @@ class SegmentViewer(QMainWindow):
         if self.headset_source == 'lsl_inlet':
             status = (f"Connected via LSL ({self.stream_type}): {self.num_channels} ch "
                       f"@ {self.sampling_rate} Hz")
+        elif self.headset_source == 'unicorn_serial':
+            status = (f"Connected (Unicorn Hybrid 8ch): "
+                      f"{self.num_channels} ch @ {self.sampling_rate} Hz")
         else:
             board_label = ""
             if BRAINFLOW_AVAILABLE and self.board_id is not None:
@@ -3707,6 +3874,12 @@ class SegmentViewer(QMainWindow):
                 self.board.stop_stream()
                 self.board.release_session()
                 self.board = None
+
+            # Unicorn serial reader
+            unicorn = getattr(self, '_unicorn_reader', None)
+            if unicorn is not None:
+                unicorn.stop()
+                self._unicorn_reader = None
 
             # LSL inlet
             if self.lsl_inlet is not None:
@@ -4119,12 +4292,27 @@ class SegmentViewer(QMainWindow):
 
     def update_stream_data(self):
         """Drain EEG source, push to LSL/XDF, and (when active) update visualization."""
-        if self.board is None and self.lsl_inlet is None:
+        unicorn = getattr(self, '_unicorn_reader', None)
+        if self.board is None and self.lsl_inlet is None and unicorn is None:
             return
 
         try:
             # ── Acquire new samples ────────────────────────────────────────────
-            if self.headset_source == 'lsl_inlet':
+            if self.headset_source == 'unicorn_serial' and unicorn is not None:
+                eeg_data = unicorn.drain()
+                if eeg_data is None:
+                    return
+                # eeg_data is (8, N) in microvolts
+
+                # --- Always push raw data to LSL and XDF ---
+                eeg_list = eeg_data.T.tolist()
+                if self.eeg_outlet is not None and LSL_AVAILABLE:
+                    self.eeg_outlet.push_chunk(eeg_list)
+                if self.xdf_recorder is not None:
+                    ts_list = [time.time()] * eeg_data.shape[1]
+                    self.xdf_recorder.push_eeg(ts_list, eeg_list)
+
+            elif self.headset_source == 'lsl_inlet':
                 samples, timestamps_lsl = self.lsl_inlet.pull_chunk(
                     timeout=0.0, max_samples=512
                 )
